@@ -12,11 +12,17 @@ public class RecognitionResponse
 
 public class RecognizedEventDto
 {
-    public string EventUniqueId { get; set; } = string.Empty;
-    public string Title { get; set; } = string.Empty;
+    /// <summary>Whether DeepSeek classified this post as an event.</summary>
+    public bool IsEvent { get; set; }
+
+    // --- Event fields (populated only when IsEvent == true) ---
+    public string? EventUniqueId { get; set; }
+    public string? Title { get; set; }
     public DateTime? EventDate { get; set; }
     public string? EventDateDescription { get; set; }
-    public string Summary { get; set; } = string.Empty;
+    public string? Summary { get; set; }
+
+    // --- Original post fields (always populated) ---
     public string Account { get; set; } = string.Empty;
     public string PostId { get; set; } = string.Empty;
     public string Caption { get; set; } = string.Empty;

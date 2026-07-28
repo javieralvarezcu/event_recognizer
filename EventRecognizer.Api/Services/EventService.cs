@@ -57,7 +57,7 @@ public class EventService : IEventService
             eventPosts.Add(eventRecord);
         }
 
-        // 3. Check for duplicates (skip existing post_ids) and persist
+        // 3. Check for duplicates (skip existing post_ids) and persist only new events
         var existingPostIds = await _dbContext.EventRecords
             .Where(e => eventPosts.Select(ep => ep.PostId).Contains(e.PostId))
             .Select(e => e.PostId)
@@ -74,14 +74,14 @@ public class EventService : IEventService
             _logger.LogInformation("Persisted {Count} new events", newEvents.Count);
         }
 
-        // 4. Build response — return all event posts (new + already existing)
-        //    But for already-existing ones, return from DB
-        var allEventUniqueIds = eventPosts.Select(e => e.PostId).ToHashSet();
+        // 4. Fetch existing events from DB so we return full data for duplicates too
+        var allEventPostIds = eventPosts.Select(e => e.PostId).ToHashSet();
         var existingEvents = await _dbContext.EventRecords
-            .Where(e => allEventUniqueIds.Contains(e.PostId))
+            .Where(e => allEventPostIds.Contains(e.PostId))
             .ToListAsync(ct);
 
-        return MapToResponse(existingEvents, posts.Count);
+        // 5. Build response — return ALL posts (event + non-event)
+        return MapToResponse(posts, analyses, existingEvents);
     }
 
     public async Task<EventDetailResponse?> GetEventByUniqueIdAsync(string eventUniqueId, CancellationToken ct = default)
@@ -114,20 +114,54 @@ public class EventService : IEventService
         return null;
     }
 
-    private static RecognitionResponse MapToResponse(List<EventRecord> events, int totalPosts)
+    private static RecognitionResponse MapToResponse(
+        List<InstagramPost> posts,
+        List<PostAnalysisResult> analyses,
+        List<EventRecord> dbEvents)
     {
+        var dbEventsByPostId = dbEvents.ToDictionary(e => e.PostId);
+
+        var results = new List<RecognizedEventDto>(posts.Count);
+        for (int i = 0; i < posts.Count && i < analyses.Count; i++)
+        {
+            var post = posts[i];
+            var analysis = analyses[i];
+
+            if (analysis.IsEvent && dbEventsByPostId.TryGetValue(post.PostId, out var dbEvent))
+            {
+                // Event post — return full event data from DB
+                results.Add(MapToDto(dbEvent, isEvent: true));
+            }
+            else
+            {
+                // Non-event post — return only post fields, no event data
+                results.Add(new RecognizedEventDto
+                {
+                    IsEvent = false,
+                    Account = post.Account,
+                    PostId = post.PostId,
+                    Caption = post.Caption,
+                    PostDatetime = post.Datetime,
+                    Url = post.Url,
+                    ImageUrl = post.ImageUrl,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+        }
+
         return new RecognitionResponse
         {
-            TotalPosts = totalPosts,
-            EventsFound = events.Count,
-            Events = events.Select(MapToDto).ToList()
+            TotalPosts = posts.Count,
+            EventsFound = results.Count(r => r.IsEvent),
+            Events = results
         };
     }
 
-    private static RecognizedEventDto MapToDto(EventRecord e)
+    private static RecognizedEventDto MapToDto(EventRecord e, bool isEvent = true)
     {
         return new RecognizedEventDto
         {
+            IsEvent = isEvent,
             EventUniqueId = e.EventUniqueId,
             Title = e.Title,
             EventDate = e.EventDate,
