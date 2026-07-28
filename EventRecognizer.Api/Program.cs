@@ -6,7 +6,10 @@ var builder = WebApplication.CreateBuilder(args);
 
 // --- Database ---
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
+    ?? Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection")
+    ?? throw new InvalidOperationException(
+        "Connection string not found. Set ConnectionStrings__DefaultConnection environment variable " +
+        "or add a ConnectionStrings.DefaultConnection entry in appsettings.Development.json.");
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(connectionString));
