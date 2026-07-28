@@ -39,6 +39,26 @@ builder.Services.AddSwaggerGen(c =>
             **Importante:** El endpoint `POST /api/events/recognize` requiere el header `X-DeepSeek-API-Key` con un token válido de API de DeepSeek.
             """
     });
+
+    // Permitir meter la API Key desde Swagger UI
+    c.AddSecurityDefinition("DeepSeekApiKey", new()
+    {
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Name = "X-DeepSeek-API-Key",
+        Description = "Token de API de DeepSeek"
+    });
+
+    c.AddSecurityRequirement(new()
+    {
+        {
+            new()
+            {
+                Reference = new() { Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme, Id = "DeepSeekApiKey" }
+            },
+            Array.Empty<string>()
+        }
+    });
 });
 
 var app = builder.Build();
