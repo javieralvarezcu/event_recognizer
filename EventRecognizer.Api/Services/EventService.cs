@@ -1,0 +1,164 @@
+using System.Security.Cryptography;
+using System.Text;
+using EventRecognizer.Api.Data;
+using EventRecognizer.Api.Dtos;
+using EventRecognizer.Api.Models;
+using Microsoft.EntityFrameworkCore;
+
+namespace EventRecognizer.Api.Services;
+
+public class EventService : IEventService
+{
+    private readonly IDeepSeekService _deepSeekService;
+    private readonly AppDbContext _dbContext;
+    private readonly ILogger<EventService> _logger;
+
+    public EventService(IDeepSeekService deepSeekService, AppDbContext dbContext, ILogger<EventService> logger)
+    {
+        _deepSeekService = deepSeekService;
+        _dbContext = dbContext;
+        _logger = logger;
+    }
+
+    public async Task<RecognitionResponse> RecognizeEventsAsync(
+        List<InstagramPost> posts,
+        string deepSeekApiKey,
+        CancellationToken ct = default)
+    {
+        // 1. Send all posts to DeepSeek for analysis
+        var analyses = await _deepSeekService.AnalyzePostsAsync(posts, deepSeekApiKey, ct);
+
+        // 2. Build event records for posts identified as events
+        var eventPosts = new List<EventRecord>();
+        for (int i = 0; i < posts.Count && i < analyses.Count; i++)
+        {
+            if (!analyses[i].IsEvent)
+                continue;
+
+            var post = posts[i];
+            var analysis = analyses[i];
+
+            var eventRecord = new EventRecord
+            {
+                EventUniqueId = GenerateEventUniqueId(post, analysis),
+                Title = analysis.Title ?? "Sin título",
+                EventDate = ParseEventDate(analysis.EventDate),
+                EventDateDescription = analysis.EventDateDescription,
+                Summary = analysis.Summary ?? "Sin resumen",
+                Account = post.Account,
+                PostId = post.PostId,
+                Caption = post.Caption,
+                PostDatetime = post.Datetime,
+                Url = post.Url,
+                ImageUrl = post.ImageUrl,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            eventPosts.Add(eventRecord);
+        }
+
+        // 3. Check for duplicates (skip existing post_ids) and persist
+        var existingPostIds = await _dbContext.EventRecords
+            .Where(e => eventPosts.Select(ep => ep.PostId).Contains(e.PostId))
+            .Select(e => e.PostId)
+            .ToListAsync(ct);
+
+        var newEvents = eventPosts
+            .Where(ep => !existingPostIds.Contains(ep.PostId))
+            .ToList();
+
+        if (newEvents.Count > 0)
+        {
+            _dbContext.EventRecords.AddRange(newEvents);
+            await _dbContext.SaveChangesAsync(ct);
+            _logger.LogInformation("Persisted {Count} new events", newEvents.Count);
+        }
+
+        // 4. Build response — return all event posts (new + already existing)
+        //    But for already-existing ones, return from DB
+        var allEventUniqueIds = eventPosts.Select(e => e.PostId).ToHashSet();
+        var existingEvents = await _dbContext.EventRecords
+            .Where(e => allEventUniqueIds.Contains(e.PostId))
+            .ToListAsync(ct);
+
+        return MapToResponse(existingEvents, posts.Count);
+    }
+
+    public async Task<EventDetailResponse?> GetEventByUniqueIdAsync(string eventUniqueId, CancellationToken ct = default)
+    {
+        var record = await _dbContext.EventRecords
+            .FirstOrDefaultAsync(e => e.EventUniqueId == eventUniqueId, ct);
+
+        if (record == null)
+            return null;
+
+        return MapToDetailDto(record);
+    }
+
+    private static string GenerateEventUniqueId(InstagramPost post, PostAnalysisResult analysis)
+    {
+        var raw = $"{post.PostId}-{post.Account}-{analysis.Title}";
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)))[..8];
+        var datePart = DateTime.UtcNow.ToString("yyyyMMdd");
+        return $"EVT-{datePart}-{hash}";
+    }
+
+    private static DateTime? ParseEventDate(string? eventDateStr)
+    {
+        if (string.IsNullOrWhiteSpace(eventDateStr))
+            return null;
+
+        if (DateTime.TryParse(eventDateStr, out var parsed))
+            return parsed.ToUniversalTime();
+
+        return null;
+    }
+
+    private static RecognitionResponse MapToResponse(List<EventRecord> events, int totalPosts)
+    {
+        return new RecognitionResponse
+        {
+            TotalPosts = totalPosts,
+            EventsFound = events.Count,
+            Events = events.Select(MapToDto).ToList()
+        };
+    }
+
+    private static RecognizedEventDto MapToDto(EventRecord e)
+    {
+        return new RecognizedEventDto
+        {
+            EventUniqueId = e.EventUniqueId,
+            Title = e.Title,
+            EventDate = e.EventDate,
+            EventDateDescription = e.EventDateDescription,
+            Summary = e.Summary,
+            Account = e.Account,
+            PostId = e.PostId,
+            Caption = e.Caption,
+            PostDatetime = e.PostDatetime,
+            Url = e.Url,
+            ImageUrl = e.ImageUrl,
+            CreatedAt = e.CreatedAt
+        };
+    }
+
+    private static EventDetailResponse MapToDetailDto(EventRecord e)
+    {
+        return new EventDetailResponse
+        {
+            EventUniqueId = e.EventUniqueId,
+            Title = e.Title,
+            EventDate = e.EventDate,
+            EventDateDescription = e.EventDateDescription,
+            Summary = e.Summary,
+            Account = e.Account,
+            PostId = e.PostId,
+            Caption = e.Caption,
+            PostDatetime = e.PostDatetime,
+            Url = e.Url,
+            ImageUrl = e.ImageUrl,
+            CreatedAt = e.CreatedAt
+        };
+    }
+}
