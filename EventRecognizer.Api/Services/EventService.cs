@@ -47,7 +47,7 @@ public class EventService : IEventService
                 Summary = analysis.Summary ?? "Sin resumen",
                 Account = post.Account,
                 PostId = post.PostId,
-                Caption = post.Caption,
+                Caption = Truncate(post.Caption, 4000),
                 PostDatetime = post.Datetime,
                 Url = post.Url,
                 ImageUrl = post.ImageUrl,
@@ -141,6 +141,14 @@ public class EventService : IEventService
             ImageUrl = e.ImageUrl,
             CreatedAt = e.CreatedAt
         };
+    }
+
+    private static string Truncate(string? value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        return value.Length <= maxLength ? value : value[..maxLength];
     }
 
     private static EventDetailResponse MapToDetailDto(EventRecord e)

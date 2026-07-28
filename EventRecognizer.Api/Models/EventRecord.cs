@@ -53,7 +53,7 @@ public class EventRecord
     [MaxLength(100)]
     public string PostId { get; set; } = string.Empty;
 
-    [MaxLength(500)]
+    [MaxLength(4000)]
     public string Caption { get; set; } = string.Empty;
 
     public DateTime? PostDatetime { get; set; }
