@@ -248,7 +248,7 @@ Recupera un evento previamente reconocido por su identificador único.
 | Columna | Tipo | Restricciones | Descripción |
 |---|---|---|---|
 | `Id` | `int` | PK, IDENTITY | Clave primaria autoincremental |
-| `EventUniqueId` | `nvarchar(50)` | NOT NULL, UNIQUE | ID generado: `EVT-{yyyyMMdd}-{SHA256[8]}` |
+| `EventUniqueId` | `nvarchar(50)` | NOT NULL, UNIQUE | ID generado: `EVT-{yyyyMMdd}-{SHA256[12]}` |
 | `Title` | `nvarchar(300)` | NOT NULL | Título del evento extraído por el LLM |
 | `EventDate` | `datetime2` | NULL | Fecha y hora del evento (ISO 8601) |
 | `EventDateDescription` | `nvarchar(500)` | NULL | Descripción textual si la fecha no es concreta |
@@ -470,13 +470,13 @@ El sistema utiliza un prompt de sistema en español que instruye a DeepSeek a cl
 
 ### Generación de `EventUniqueId`
 
-El ID único de evento se genera combinando `PostId`, `Account` y `Title`, aplicando SHA256 y tomando los primeros 8 caracteres del hash:
+El ID único de evento se genera combinando `PostId`, `Account` y `Title`, aplicando SHA256 y tomando los primeros 12 caracteres del hash:
 
 ```
-EVT-{yyyyMMdd}-{SHA256(PostId + Account + Title)[0..8]}
+EVT-{yyyyMMdd}-{SHA256(PostId + Account + Title)[0..12]}
 ```
 
-Ejemplo: `EVT-20260728-A1B2C3D4`
+Ejemplo: `EVT-20260728-A1B2C3D4E5F6`
 
 ---
 

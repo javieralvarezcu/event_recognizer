@@ -28,14 +28,18 @@ public class EventService : IEventService
         // 1. Send all posts to DeepSeek for analysis
         var analyses = await _deepSeekService.AnalyzePostsAsync(posts, deepSeekApiKey, ct);
 
-        // 2. Build event records for posts identified as events
-        var eventPosts = new List<EventRecord>();
+        // 2. Build event records for posts identified as events.
+        //    Keyed by PostId so repeated posts within the same batch are only processed once.
+        var eventPosts = new Dictionary<string, EventRecord>();
         for (int i = 0; i < posts.Count && i < analyses.Count; i++)
         {
             if (!analyses[i].IsEvent)
                 continue;
 
             var post = posts[i];
+            if (eventPosts.ContainsKey(post.PostId))
+                continue;
+
             var analysis = analyses[i];
 
             var eventRecord = new EventRecord
@@ -54,28 +58,62 @@ public class EventService : IEventService
                 CreatedAt = DateTime.UtcNow
             };
 
-            eventPosts.Add(eventRecord);
+            eventPosts[post.PostId] = eventRecord;
         }
 
         // 3. Check for duplicates (skip existing post_ids) and persist only new events
+        var eventRecords = eventPosts.Values.ToList();
+
         var existingPostIds = await _dbContext.EventRecords
-            .Where(e => eventPosts.Select(ep => ep.PostId).Contains(e.PostId))
+            .Where(e => eventRecords.Select(ep => ep.PostId).Contains(e.PostId))
             .Select(e => e.PostId)
             .ToListAsync(ct);
 
-        var newEvents = eventPosts
+        var newEvents = eventRecords
             .Where(ep => !existingPostIds.Contains(ep.PostId))
             .ToList();
 
         if (newEvents.Count > 0)
         {
             _dbContext.EventRecords.AddRange(newEvents);
-            await _dbContext.SaveChangesAsync(ct);
-            _logger.LogInformation("Persisted {Count} new events", newEvents.Count);
+
+            try
+            {
+                await _dbContext.SaveChangesAsync(ct);
+                _logger.LogInformation("Persisted {Count} new events", newEvents.Count);
+            }
+            catch (DbUpdateException ex)
+            {
+                // Race: a concurrent request inserted one or more of these events after
+                // our duplicate check. Detach the pending inserts, re-check against the
+                // DB and retry only the ones that are still missing.
+                _logger.LogWarning(ex, "Duplicate key conflict while saving events. Re-checking and retrying.");
+
+                foreach (var entry in _dbContext.ChangeTracker.Entries<EventRecord>().ToList())
+                {
+                    _dbContext.Entry(entry.Entity).State = EntityState.Detached;
+                }
+
+                var nowExistingPostIds = await _dbContext.EventRecords
+                    .Where(e => newEvents.Select(n => n.PostId).Contains(e.PostId))
+                    .Select(e => e.PostId)
+                    .ToListAsync(ct);
+
+                var remaining = newEvents
+                    .Where(n => !nowExistingPostIds.Contains(n.PostId))
+                    .ToList();
+
+                if (remaining.Count > 0)
+                {
+                    _dbContext.EventRecords.AddRange(remaining);
+                    await _dbContext.SaveChangesAsync(ct);
+                    _logger.LogInformation("Persisted {Count} new events after retry", remaining.Count);
+                }
+            }
         }
 
         // 4. Fetch existing events from DB so we return full data for duplicates too
-        var allEventPostIds = eventPosts.Select(e => e.PostId).ToHashSet();
+        var allEventPostIds = eventRecords.Select(e => e.PostId).ToHashSet();
         var existingEvents = await _dbContext.EventRecords
             .Where(e => allEventPostIds.Contains(e.PostId))
             .ToListAsync(ct);
@@ -98,7 +136,7 @@ public class EventService : IEventService
     private static string GenerateEventUniqueId(InstagramPost post, PostAnalysisResult analysis)
     {
         var raw = $"{post.PostId}-{post.Account}-{analysis.Title}";
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)))[..8];
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)))[..12];
         var datePart = DateTime.UtcNow.ToString("yyyyMMdd");
         return $"EVT-{datePart}-{hash}";
     }
@@ -122,9 +160,13 @@ public class EventService : IEventService
         var dbEventsByPostId = dbEvents.ToDictionary(e => e.PostId);
 
         var results = new List<RecognizedEventDto>(posts.Count);
+        var seenPostIds = new HashSet<string>();
         for (int i = 0; i < posts.Count && i < analyses.Count; i++)
         {
             var post = posts[i];
+            if (!seenPostIds.Add(post.PostId))
+                continue;
+
             var analysis = analyses[i];
 
             if (analysis.IsEvent && dbEventsByPostId.TryGetValue(post.PostId, out var dbEvent))

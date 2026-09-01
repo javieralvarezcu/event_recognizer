@@ -2,6 +2,7 @@ using EventRecognizer.Api.Dtos;
 using EventRecognizer.Api.Models;
 using EventRecognizer.Api.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace EventRecognizer.Api.Controllers;
 
@@ -72,6 +73,15 @@ public class EventsController : ControllerBase
             return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponse
             {
                 Error = "Failed to communicate with the LLM service",
+                Detail = ex.Message
+            });
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Failed to save events to the database");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to save events to the database",
                 Detail = ex.Message
             });
         }
