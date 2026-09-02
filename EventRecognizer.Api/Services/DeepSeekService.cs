@@ -106,10 +106,14 @@ public class DeepSeekService : IDeepSeekService
                     attempt, MaxAttempts);
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+            await DelayBetweenRetriesAsync(attempt, ct);
             attempt++;
         }
     }
+
+    // Retry backoff between attempts. Virtual so tests can skip the delay.
+    protected virtual Task DelayBetweenRetriesAsync(int attempt, CancellationToken ct)
+        => Task.Delay(TimeSpan.FromSeconds(attempt), ct);
 
     private static bool IsTransientHttpError(HttpRequestException ex) =>
         ex.StatusCode is HttpStatusCode.TooManyRequests
