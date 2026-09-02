@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using EventRecognizer.Api.Models;
@@ -9,6 +10,12 @@ public class DeepSeekService : IDeepSeekService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<DeepSeekService> _logger;
     private const string DeepSeekApiUrl = "https://api.deepseek.com/v1/chat/completions";
+
+    // A batch of ~57 posts overflowed the 4096-token output limit and DeepSeek cut the
+    // JSON mid-string ("Expected end of string, but instead reached end of data").
+    // Process posts in small chunks so each response fits comfortably in the token budget.
+    private const int PostsPerChunk = 20;
+    private const int MaxAttempts = 3; // initial attempt + 2 retries
 
     public DeepSeekService(IHttpClientFactory httpClientFactory, ILogger<DeepSeekService> logger)
     {
@@ -24,6 +31,97 @@ public class DeepSeekService : IDeepSeekService
         if (posts.Count == 0)
             return new List<PostAnalysisResult>();
 
+        // Callers pair results with the input posts by index, so allocate the full
+        // array and fill it chunk by chunk, keeping the alignment intact.
+        var results = new PostAnalysisResult[posts.Count];
+
+        for (var offset = 0; offset < posts.Count; offset += PostsPerChunk)
+        {
+            var chunk = posts.GetRange(offset, Math.Min(PostsPerChunk, posts.Count - offset));
+
+            var chunkResults = await AnalyzeChunkWithRetriesAsync(chunk, apiKey, ct);
+            if (chunkResults == null)
+            {
+                // Exhausted all attempts: fail gracefully and treat the chunk as
+                // non-events instead of failing the whole request.
+                _logger.LogError(
+                    "DeepSeek failed to analyze {Count} posts after {MaxAttempts} attempts; returning them as non-events",
+                    chunk.Count, MaxAttempts);
+                chunkResults = chunk.Select(_ => new PostAnalysisResult { IsEvent = false }).ToList();
+            }
+
+            // Pad with non-events if the LLM returned fewer results than requested
+            // (and ignore extras), so index alignment is preserved no matter what.
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                results[offset + i] = i < chunkResults.Count
+                    ? chunkResults[i]
+                    : new PostAnalysisResult { IsEvent = false };
+            }
+        }
+
+        return results.ToList();
+    }
+
+    private async Task<List<PostAnalysisResult>?> AnalyzeChunkWithRetriesAsync(
+        List<InstagramPost> chunk,
+        string apiKey,
+        CancellationToken ct)
+    {
+        var attempt = 1;
+        while (true)
+        {
+            try
+            {
+                return await AnalyzeChunkAsync(chunk, apiKey, ct);
+            }
+            catch (InvalidOperationException ex)
+            {
+                if (attempt >= MaxAttempts)
+                {
+                    _logger.LogError(ex,
+                        "DeepSeek returned an unexpected response format after {MaxAttempts} attempts",
+                        MaxAttempts);
+                    return null;
+                }
+
+                // Truncated/malformed JSON from the LLM: worth retrying — the model
+                // often produces a valid response on a second attempt.
+                _logger.LogWarning(ex,
+                    "DeepSeek returned an unexpected response format (attempt {Attempt}/{MaxAttempts}). Retrying...",
+                    attempt, MaxAttempts);
+            }
+            catch (HttpRequestException ex) when (IsTransientHttpError(ex))
+            {
+                if (attempt >= MaxAttempts)
+                {
+                    _logger.LogError(ex,
+                        "DeepSeek API returned a transient HTTP error after {MaxAttempts} attempts",
+                        MaxAttempts);
+                    throw; // API unreachable: let the controller return 502 rather than fake results
+                }
+
+                _logger.LogWarning(ex,
+                    "DeepSeek API returned a transient HTTP error (attempt {Attempt}/{MaxAttempts}). Retrying...",
+                    attempt, MaxAttempts);
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+            attempt++;
+        }
+    }
+
+    private static bool IsTransientHttpError(HttpRequestException ex) =>
+        ex.StatusCode is HttpStatusCode.TooManyRequests
+            or HttpStatusCode.InternalServerError
+            or HttpStatusCode.BadGateway
+            or HttpStatusCode.ServiceUnavailable;
+
+    private async Task<List<PostAnalysisResult>> AnalyzeChunkAsync(
+        List<InstagramPost> posts,
+        string apiKey,
+        CancellationToken ct)
+    {
         var systemPrompt = BuildSystemPrompt();
         var userPrompt = BuildUserPrompt(posts);
 
@@ -55,20 +153,31 @@ public class DeepSeekService : IDeepSeekService
         response.EnsureSuccessStatusCode();
 
         var responseBody = await response.Content.ReadAsStringAsync(ct);
-        var deepSeekResponse = JsonSerializer.Deserialize<DeepSeekResponse>(responseBody);
+
+        DeepSeekResponse? deepSeekResponse;
+        try
+        {
+            deepSeekResponse = JsonSerializer.Deserialize<DeepSeekResponse>(responseBody);
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("The DeepSeek API returned a malformed response.", ex);
+        }
 
         if (deepSeekResponse?.Choices == null || deepSeekResponse.Choices.Count == 0)
-        {
-            _logger.LogWarning("DeepSeek returned no choices");
-            return new List<PostAnalysisResult>();
-        }
+            throw new InvalidOperationException("DeepSeek returned no choices.");
 
-        var responseContent = deepSeekResponse.Choices[0].Message?.Content;
+        var choice = deepSeekResponse.Choices[0];
+
+        // finish_reason == "length" means the output hit the token limit, so the JSON
+        // is almost certainly truncated — treat it as a malformed response and retry.
+        if (string.Equals(choice.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "DeepSeek response was truncated by the token limit (finish_reason=length).");
+
+        var responseContent = choice.Message?.Content;
         if (string.IsNullOrWhiteSpace(responseContent))
-        {
-            _logger.LogWarning("DeepSeek response content was empty");
-            return new List<PostAnalysisResult>();
-        }
+            throw new InvalidOperationException("DeepSeek response content was empty.");
 
         _logger.LogInformation("Raw DeepSeek response received ({Length} chars)", responseContent.Length);
 
@@ -79,7 +188,7 @@ public class DeepSeekService : IDeepSeekService
         }
         catch (JsonException ex)
         {
-            _logger.LogError(ex, "Failed to deserialize DeepSeek response: {Content}",
+            _logger.LogWarning(ex, "Failed to deserialize DeepSeek response: {Content}",
                 responseContent[..Math.Min(500, responseContent.Length)]);
             throw new InvalidOperationException("The LLM returned an unexpected response format.", ex);
         }

@@ -77,6 +77,9 @@ public class DeepSeekChoice
 {
     [JsonPropertyName("message")]
     public DeepSeekChoiceMessage? Message { get; set; }
+
+    [JsonPropertyName("finish_reason")]
+    public string? FinishReason { get; set; }
 }
 
 public class DeepSeekChoiceMessage
