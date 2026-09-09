@@ -320,6 +320,35 @@ public class EventsControllerTests
     }
 
     [Fact]
+    public async Task GetAllMuxo_ReturnsOkWithEventsFromService()
+    {
+        var events = new List<MuxoEventDto>
+        {
+            new() { ExternalId = "20", Title = "TANZ", IsCrossed = false }
+        };
+        var service = new FakeEventService(getAllMuxo: _ => Task.FromResult(events));
+        var controller = CreateController(service);
+
+        var result = await controller.GetAllMuxo(CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Same(events, ok.Value);
+    }
+
+    [Fact]
+    public async Task GetAllMuxo_WhenServiceReturnsEmptyList_ReturnsOkWithEmptyArray()
+    {
+        var service = new FakeEventService(getAllMuxo: _ => Task.FromResult(new List<MuxoEventDto>()));
+        var controller = CreateController(service);
+
+        var result = await controller.GetAllMuxo(CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var events = Assert.IsType<List<MuxoEventDto>>(ok.Value);
+        Assert.Empty(events);
+    }
+
+    [Fact]
     public async Task CrossCheck_WithMissingApiKey_Returns401()
     {
         var controller = CreateController(new FakeEventService());

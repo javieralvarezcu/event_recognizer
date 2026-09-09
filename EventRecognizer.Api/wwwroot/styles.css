@@ -171,10 +171,16 @@ main {
 
 .calendar-toolbar .legend {
   display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
   font-size: 0.85rem;
   color: #5b6472;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .legend-dot {
@@ -186,6 +192,10 @@ main {
 
 .legend-dot.crossed {
   background: #2e7d4f;
+}
+
+.legend-dot.muxo-only {
+  background: #7c3aed;
 }
 
 #calendar {

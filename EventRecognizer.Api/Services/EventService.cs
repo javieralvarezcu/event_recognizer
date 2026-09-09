@@ -184,6 +184,32 @@ public class EventService : IEventService
         return records.Select(r => MapToDetailDto(r, matches.GetValueOrDefault(r.EventUniqueId))).ToList();
     }
 
+    public async Task<List<MuxoEventDto>> GetMuxoEventsAsync(CancellationToken ct = default)
+    {
+        var muxoEvents = await _dbContext.MuxoEvents
+            .AsNoTracking()
+            .OrderBy(m => m.Date)
+            .ToListAsync(ct);
+
+        var matchedMuxoIds = (await _dbContext.CrossMatches
+            .AsNoTracking()
+            .Select(m => m.MuxoEventId)
+            .ToListAsync(ct))
+            .ToHashSet();
+
+        return muxoEvents.Select(m => new MuxoEventDto
+        {
+            ExternalId = m.ExternalId,
+            Title = m.Title,
+            Date = m.Date,
+            Venue = m.Venue,
+            Link = m.Link,
+            Categories = m.Categories,
+            Price = m.Price,
+            IsCrossed = matchedMuxoIds.Contains(m.Id)
+        }).ToList();
+    }
+
     public async Task<CrossCheckResponse> CrossCheckAsync(string deepSeekApiKey, CancellationToken ct = default)
     {
         // 1. Scrape the muxojaleo calendar and upsert the events (dedupe by external id,

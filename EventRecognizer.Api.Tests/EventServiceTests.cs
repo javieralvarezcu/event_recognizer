@@ -638,6 +638,50 @@ public class EventServiceTests
     }
 
     [Fact]
+    public async Task GetMuxoEventsAsync_ReturnsMuxoEventsWithCrossedFlag()
+    {
+        using var fixture = new TestDatabase();
+        var ourEvent = TestData.CreateRecord("EVT-1", "Jam de poesía", postId: "p1");
+        var matched = TestData.CreateMuxoEvent("11", "Jam de poesía", new DateTime(2026, 9, 9), "Círculo Juan 23",
+            "https://www.instagram.com/p/X/", "Jam, Poesía");
+        var unmatched = TestData.CreateMuxoEvent("20", "TANZ", new DateTime(2026, 9, 26), "M100", null, "Fiesta");
+        fixture.Db.EventRecords.Add(ourEvent);
+        fixture.Db.MuxoEvents.AddRange(matched, unmatched);
+        await fixture.Db.SaveChangesAsync();
+        fixture.Db.CrossMatches.Add(new CrossMatch { EventUniqueId = "EVT-1", MuxoEventId = matched.Id });
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var result = await service.GetMuxoEventsAsync();
+
+        Assert.Equal(2, result.Count);
+        var matchedDto = result.Single(m => m.ExternalId == "11");
+        Assert.True(matchedDto.IsCrossed);
+        Assert.Equal("Jam de poesía", matchedDto.Title);
+        Assert.Equal("Círculo Juan 23", matchedDto.Venue);
+        Assert.Equal("Jam, Poesía", matchedDto.Categories);
+
+        var unmatchedDto = result.Single(m => m.ExternalId == "20");
+        Assert.False(unmatchedDto.IsCrossed);
+        Assert.Equal("M100", unmatchedDto.Venue);
+
+        // Ordered by date.
+        Assert.Equal("11", result[0].ExternalId);
+    }
+
+    [Fact]
+    public async Task GetMuxoEventsAsync_WithNoMuxoEvents_ReturnsEmptyList()
+    {
+        using var fixture = new TestDatabase();
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var result = await service.GetMuxoEventsAsync();
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
     public async Task GetAllEventsAsync_IncludesCrossMatchInfo()
     {
         using var fixture = new TestDatabase();

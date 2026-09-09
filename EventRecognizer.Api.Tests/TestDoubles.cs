@@ -167,19 +167,22 @@ public sealed class FakeEventService : IEventService
     private readonly Func<CancellationToken, Task<List<EventDetailResponse>>>? _getAll;
     private readonly Func<int, int, string, CancellationToken, Task<CleanupResponse>>? _cleanup;
     private readonly Func<string, CancellationToken, Task<CrossCheckResponse>>? _crossCheck;
+    private readonly Func<CancellationToken, Task<List<MuxoEventDto>>>? _getAllMuxo;
 
     public FakeEventService(
         Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? recognize = null,
         Func<string, CancellationToken, Task<EventDetailResponse?>>? getByUniqueId = null,
         Func<CancellationToken, Task<List<EventDetailResponse>>>? getAll = null,
         Func<int, int, string, CancellationToken, Task<CleanupResponse>>? cleanup = null,
-        Func<string, CancellationToken, Task<CrossCheckResponse>>? crossCheck = null)
+        Func<string, CancellationToken, Task<CrossCheckResponse>>? crossCheck = null,
+        Func<CancellationToken, Task<List<MuxoEventDto>>>? getAllMuxo = null)
     {
         _recognize = recognize;
         _getByUniqueId = getByUniqueId;
         _getAll = getAll;
         _cleanup = cleanup;
         _crossCheck = crossCheck;
+        _getAllMuxo = getAllMuxo;
     }
 
     public DateRange? LastDateRange { get; private set; }
@@ -219,6 +222,11 @@ public sealed class FakeEventService : IEventService
         => _crossCheck != null
             ? _crossCheck(deepSeekApiKey, ct)
             : throw new InvalidOperationException("No crossCheck delegate configured.");
+
+    public Task<List<MuxoEventDto>> GetMuxoEventsAsync(CancellationToken ct = default)
+        => _getAllMuxo != null
+            ? _getAllMuxo(ct)
+            : throw new InvalidOperationException("No getAllMuxo delegate configured.");
 }
 
 /// <summary>

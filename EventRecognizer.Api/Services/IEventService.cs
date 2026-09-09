@@ -56,4 +56,10 @@ public interface IEventService
     /// <param name="deepSeekApiKey">The DeepSeek API key from the request header.</param>
     /// <param name="ct">Cancellation token.</param>
     Task<CrossCheckResponse> CrossCheckAsync(string deepSeekApiKey, CancellationToken ct = default);
+
+    /// <summary>
+    /// Retrieves all persisted muxojaleo events (ordered by date) with whether each one
+    /// is already crossed with one of our events.
+    /// </summary>
+    Task<List<MuxoEventDto>> GetMuxoEventsAsync(CancellationToken ct = default);
 }

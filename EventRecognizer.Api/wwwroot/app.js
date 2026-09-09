@@ -116,6 +116,7 @@ function openModal(e) {
   $('modal-title').textContent = e.title || 'Sin título';
   $('modal-summary').textContent = e.summary || '—';
   $('modal-date-description').textContent = e.eventDateDescription || '—';
+  $('modal-account-label').textContent = 'Cuenta';
   $('modal-account').textContent = e.account || '—';
   $('modal-recurrence').textContent = formatRecurrence(e);
 
@@ -149,6 +150,8 @@ function openModal(e) {
   }
 
   $('modal-caption').textContent = e.caption || '';
+  $('modal-caption-title').classList.remove('hidden');
+  $('modal-caption').classList.remove('hidden');
 
   // Fila "En muxojaleo.com": solo visible cuando el evento está cruzado.
   const muxoLabel = $('modal-muxo-label');
@@ -163,6 +166,37 @@ function openModal(e) {
     muxoLabel.classList.add('hidden');
     muxoValue.classList.add('hidden');
   }
+
+  $('modal-overlay').classList.remove('hidden');
+}
+
+/** Modal para un evento que solo existe en muxojaleo.com (sin cruzar). */
+function openMuxoModal(m) {
+  $('modal-title').textContent = m.title || 'Sin título';
+  $('modal-summary').textContent = [m.categories, m.price].filter(Boolean).join(' · ') || '—';
+
+  const dateOnly = toDateOnly(m.date);
+  $('modal-date').textContent = dateOnly ? formatDateOnly(dateOnly) : '—';
+  $('modal-date-description').textContent = '—';
+  $('modal-recurrence').textContent = '—';
+  $('modal-account-label').textContent = 'Lugar';
+  $('modal-account').textContent = m.venue || '—';
+  $('modal-post-datetime').textContent = '—';
+
+  const link = $('modal-url');
+  if (m.link) {
+    link.href = m.link;
+    link.classList.remove('hidden');
+  } else {
+    link.classList.add('hidden');
+  }
+
+  $('modal-image').classList.add('hidden');
+  $('modal-image-fallback').classList.add('hidden');
+  $('modal-muxo-label').classList.add('hidden');
+  $('modal-muxo').classList.add('hidden');
+  $('modal-caption-title').classList.add('hidden');
+  $('modal-caption').classList.add('hidden');
 
   $('modal-overlay').classList.remove('hidden');
 }
@@ -215,7 +249,14 @@ function renderCalendar(events) {
       const mid = new Date((info.start.getTime() + info.end.getTime()) / 2);
       currentMonth = `${mid.getFullYear()}-${String(mid.getMonth() + 1).padStart(2, '0')}`;
     },
-    eventClick: (info) => openModal(info.event.extendedProps),
+    eventClick: (info) => {
+      const props = info.event.extendedProps;
+      if (props.muxoOnly) {
+        openMuxoModal(props);
+      } else {
+        openModal(props);
+      }
+    },
     eventContent: (arg) => {
       const lines = [escapeHtml(arg.event.title)];
       const endStr = arg.event.endStr;
@@ -239,12 +280,35 @@ function showError(message) {
   $('error-banner').classList.remove('hidden');
 }
 
-// Todos los eventos cargados (sin filtrar) y el filtro de eventos cruzados.
+// Todos los eventos cargados (sin filtrar) y los filtros de la vista.
 let allEvents = [];
+let allMuxoEvents = [];
 let showCrossed = true;
+let showMuxo = true;
 
-function visibleEvents() {
-  return showCrossed ? allEvents : allEvents.filter((e) => !e.isCrossed);
+/** Convierte un evento de muxojaleo sin cruzar en un evento del calendario. */
+function buildMuxoCalendarEvent(m) {
+  const start = toDateOnly(m.date);
+  if (!start) return null;
+  return {
+    title: m.title || 'Sin título',
+    start,
+    allDay: true,
+    backgroundColor: '#7c3aed',
+    borderColor: '#7c3aed',
+    extendedProps: { muxoOnly: true, ...m }
+  };
+}
+
+/** Eventos visibles del calendario: los nuestros (según el filtro de cruzados)
+ *  más los de muxojaleo que siguen sin cruzar (según su filtro). */
+function calendarEvents() {
+  const ours = (showCrossed ? allEvents : allEvents.filter((e) => !e.isCrossed))
+    .map(buildCalendarEvent);
+  const muxoOnly = showMuxo
+    ? allMuxoEvents.filter((m) => !m.isCrossed).map(buildMuxoCalendarEvent)
+    : [];
+  return [...ours, ...muxoOnly].filter(Boolean);
 }
 
 async function init() {
@@ -256,10 +320,15 @@ async function init() {
   }
 
   try {
-    const res = await fetch('/api/events');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    allEvents = await res.json();
-    renderCalendar(visibleEvents());
+    const [eventsRes, muxoRes] = await Promise.all([
+      fetch('/api/events'),
+      fetch('/api/events/muxo')
+    ]);
+    if (!eventsRes.ok) throw new Error(`HTTP ${eventsRes.status}`);
+    allEvents = await eventsRes.json();
+    // Los eventos de muxojaleo son opcionales: si fallan, el panel sigue funcionando.
+    allMuxoEvents = muxoRes.ok ? await muxoRes.json() : [];
+    renderCalendar(calendarEvents());
     renderNoDateList(allEvents);
   } catch {
     showError('No se pudieron cargar los eventos. Comprueba que la API está en marcha.');
@@ -269,7 +338,13 @@ async function init() {
 // Mostrar/ocultar los eventos cruzados con muxojaleo.com.
 $('show-crossed').addEventListener('change', (event) => {
   showCrossed = event.target.checked;
-  renderCalendar(visibleEvents());
+  renderCalendar(calendarEvents());
+});
+
+// Mostrar/ocultar los eventos de muxojaleo.com que siguen sin cruzar.
+$('show-muxo').addEventListener('change', (event) => {
+  showMuxo = event.target.checked;
+  renderCalendar(calendarEvents());
 });
 
 // Modal: cerrar con botón, clic fuera o Escape.

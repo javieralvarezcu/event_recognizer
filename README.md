@@ -75,6 +75,7 @@ Cliente HTTP
     │  POST /api/events/crosscheck  (header: X-DeepSeek-API-Key)
     │  GET  /api/events
     │  GET  /api/events/{eventUniqueId}
+    │  GET  /api/events/muxo
     │  GET  /                        (panel web estático: calendario)
     ▼
 EventsController
@@ -449,6 +450,31 @@ Los endpoints `GET /api/events` y `GET /api/events/{eventUniqueId}` incluyen los
 
 ---
 
+### `GET /api/events/muxo`
+
+Lista todos los eventos persistidos de muxojaleo.com (ordenados por fecha) con si cada uno está ya cruzado con uno de nuestros eventos.
+
+**Response 200:**
+
+```json
+[
+  {
+    "externalId": "20",
+    "title": "TANZ",
+    "date": "2026-09-26T20:00:00",
+    "venue": "M100",
+    "link": "https://www.instagram.com/...",
+    "categories": "Fiesta",
+    "price": null,
+    "isCrossed": false
+  }
+]
+```
+
+El panel usa este endpoint para mostrar en el calendario los eventos de muxojaleo que **aún no se han cruzado** (en morado, con su propio check para mostrarlos u ocultarlos).
+
+---
+
 ## Esquema de base de datos
 
 ### Tabla `EventRecords`
@@ -635,6 +661,7 @@ Características:
 - Los eventos sin ninguna fecha computable se listan aparte en "Eventos sin fecha".
 - Botón **"Limpiar mes"**: envía los eventos del mes visible (más los sin fecha) al LLM para detectar y eliminar duplicados.
 - Botón **"Cruzar con muxojaleo"**: raspa muxojaleo.com, guarda sus eventos y los cruza con los nuestros mediante el LLM. Los eventos cruzados se pintan de **verde** y el check "Mostrar eventos cruzados" permite ocultarlos o mostrarlos; en el modal del evento aparece la entrada "En muxojaleo.com".
+- Los eventos de muxojaleo que **siguen sin cruzar** se muestran en el calendario en **morado**, con su propio check "Mostrar eventos de muxojaleo sin cruzar"; al hacer clic se abre un modal con su título, fecha, lugar, categorías y enlace.
 - Ambas acciones requieren la API key de DeepSeek (se guarda en `localStorage` del navegador) y usan confirmación en dos pasos.
 - Sin autenticación (igual que los endpoints `GET`).
 

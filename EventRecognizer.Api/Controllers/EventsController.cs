@@ -203,6 +203,18 @@ public class EventsController : ControllerBase
     }
 
     /// <summary>
+    /// Retrieves all persisted muxojaleo events with whether each one is already
+    /// crossed with one of our events.
+    /// </summary>
+    [HttpGet("muxo")]
+    [ProducesResponseType(typeof(List<MuxoEventDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetAllMuxo(CancellationToken ct)
+    {
+        var events = await _eventService.GetMuxoEventsAsync(ct);
+        return Ok(events);
+    }
+
+    /// <summary>
     /// Scrapes the muxojaleo.com calendar (persisting new events) and cross-matches our
     /// persisted events against it via the LLM, storing the new matches so the panel
     /// can show which events are already registered there.

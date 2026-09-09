@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Calendario de eventos</title>
-  <link rel="stylesheet" href="/styles.css?v=3">
+  <link rel="stylesheet" href="/styles.css?v=4">
 </head>
 <body>
   <header>
@@ -58,10 +58,14 @@
           <input type="checkbox" id="show-crossed" checked>
           Mostrar eventos cruzados
         </label>
-        <span class="legend">
-          <span class="legend-dot crossed"></span>
-          Cruzado con muxojaleo.com
-        </span>
+        <label class="toggle">
+          <input type="checkbox" id="show-muxo" checked>
+          Mostrar eventos de muxojaleo sin cruzar
+        </label>
+        <div class="legend">
+          <span class="legend-item"><span class="legend-dot crossed"></span> Cruzado con muxojaleo.com</span>
+          <span class="legend-item"><span class="legend-dot muxo-only"></span> Solo en muxojaleo.com</span>
+        </div>
       </div>
       <div id="calendar"></div>
     </section>
@@ -89,7 +93,7 @@
         <dd id="modal-recurrence"></dd>
         <dt>Descripción de la fecha</dt>
         <dd id="modal-date-description"></dd>
-        <dt>Cuenta</dt>
+        <dt id="modal-account-label">Cuenta</dt>
         <dd id="modal-account"></dd>
         <dt>Publicado</dt>
         <dd id="modal-post-datetime"></dd>
@@ -98,7 +102,7 @@
         <dt id="modal-muxo-label">En muxojaleo.com</dt>
         <dd id="modal-muxo" class="muxo-match"></dd>
       </dl>
-      <h3>Texto del post</h3>
+      <h3 id="modal-caption-title">Texto del post</h3>
       <p id="modal-caption" class="caption"></p>
     </div>
   </div>
@@ -106,6 +110,6 @@
   <!-- FullCalendar v6 (CDN, requiere acceso a Internet) -->
   <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@fullcalendar/core@6.1.15/locales/es.global.min.js"></script>
-  <script src="/app.js?v=3"></script>
+  <script src="/app.js?v=4"></script>
 </body>
 </html>

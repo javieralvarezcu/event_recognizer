@@ -106,6 +106,29 @@ public class CrossMatchDto
     public string? Reason { get; set; }
 }
 
+/// <summary>
+/// A muxojaleo.com event, with whether it is already crossed with one of our events.
+/// </summary>
+public class MuxoEventDto
+{
+    public string ExternalId { get; set; } = string.Empty;
+
+    public string Title { get; set; } = string.Empty;
+
+    public DateTime? Date { get; set; }
+
+    public string? Venue { get; set; }
+
+    public string? Link { get; set; }
+
+    public string? Categories { get; set; }
+
+    public string? Price { get; set; }
+
+    /// <summary>Whether this muxo event is matched with one of our persisted events.</summary>
+    public bool IsCrossed { get; set; }
+}
+
 public class ErrorResponse
 {
     public string Error { get; set; } = string.Empty;
