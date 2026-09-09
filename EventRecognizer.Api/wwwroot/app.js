@@ -225,14 +225,18 @@ function renderNoDateList(events) {
   }
 }
 
-function renderCalendar(events) {
+/** Recibe los eventos YA construidos (objetos de FullCalendar) de calendarEvents(). */
+function renderCalendar(calendarEventsList) {
   const calendarEl = $('calendar');
+  // Conserva el mes visible al re-renderizar (p. ej. al togglear un check).
+  const currentDate = window.calendarInstance ? window.calendarInstance.getDate() : null;
   if (window.calendarInstance) {
     window.calendarInstance.destroy();
   }
 
   const calendar = new FullCalendar.Calendar(calendarEl, {
     initialView: 'dayGridMonth',
+    initialDate: currentDate || undefined,
     locale: 'es',
     firstDay: 1, // la semana empieza en lunes
     headerToolbar: {
@@ -242,7 +246,7 @@ function renderCalendar(events) {
     },
     buttonText: { today: 'Hoy', month: 'Mes', list: 'Lista' },
     displayEventEnd: false,
-    events: events.map(buildCalendarEvent).filter(Boolean),
+    events: calendarEventsList,
     datesSet: (info) => {
       // El mes mostrado = el del punto medio del rango visible (el inicio del rango
       // puede caer en el mes anterior por el primer día de la semana).
