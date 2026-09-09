@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EventRecognizer.Api.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260728134454_InitialCreate")]
+    [Migration("20260902013644_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -40,8 +40,8 @@ namespace EventRecognizer.Api.Migrations
 
                     b.Property<string>("Caption")
                         .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("nvarchar(500)");
+                        .HasMaxLength(4000)
+                        .HasColumnType("nvarchar(4000)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
@@ -62,6 +62,9 @@ namespace EventRecognizer.Api.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
 
+                    b.Property<bool>("IsRecurrent")
+                        .HasColumnType("bit");
+
                     b.Property<DateTime?>("PostDatetime")
                         .HasColumnType("datetime2");
 
@@ -69,6 +72,20 @@ namespace EventRecognizer.Api.Migrations
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("RecurrenceDaysOfWeek")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTime?>("RecurrenceEndDate")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("RecurrenceStartDate")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RecurrenceType")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("Summary")
                         .IsRequired()

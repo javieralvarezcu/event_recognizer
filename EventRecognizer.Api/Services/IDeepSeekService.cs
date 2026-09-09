@@ -12,9 +12,12 @@ public interface IDeepSeekService
     /// </summary>
     /// <param name="posts">The Instagram posts to analyze.</param>
     /// <param name="apiKey">The DeepSeek API key provided by the client in the request header.</param>
+    /// <param name="dateRange">Optional date range the client is interested in. Passed to the
+    /// LLM as context for resolving relative/approximate dates; the server applies the final filter.</param>
     /// <param name="ct">Cancellation token.</param>
     Task<List<PostAnalysisResult>> AnalyzePostsAsync(
         List<InstagramPost> posts,
         string apiKey,
+        DateRange? dateRange = null,
         CancellationToken ct = default);
 }

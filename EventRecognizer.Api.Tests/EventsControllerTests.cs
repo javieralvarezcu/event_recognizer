@@ -35,7 +35,7 @@ public class EventsControllerTests
     {
         var controller = CreateController(new FakeEventService());
 
-        var result = await controller.Recognize(new List<InstagramPost>(), CancellationToken.None);
+        var result = await controller.Recognize(new List<InstagramPost>(), null, null, CancellationToken.None);
 
         var badRequest = Assert.IsType<BadRequestObjectResult>(result);
         var error = Assert.IsType<ErrorResponse>(badRequest.Value);
@@ -48,7 +48,7 @@ public class EventsControllerTests
         var controller = CreateController(new FakeEventService());
 
         var result = await controller.Recognize(
-            new List<InstagramPost> { TestData.CreatePost("p1") }, CancellationToken.None);
+            new List<InstagramPost> { TestData.CreatePost("p1") }, null, null, CancellationToken.None);
 
         var unauthorized = Assert.IsType<UnauthorizedObjectResult>(result);
         var error = Assert.IsType<ErrorResponse>(unauthorized.Value);
@@ -73,12 +73,56 @@ public class EventsControllerTests
         });
         var posts = new List<InstagramPost> { TestData.CreatePost("p1") };
 
-        var result = await controller.Recognize(posts, CancellationToken.None);
+        var result = await controller.Recognize(posts, null, null, CancellationToken.None);
 
         var ok = Assert.IsType<OkObjectResult>(result);
         Assert.Same(response, ok.Value);
         Assert.Equal("secret-key", receivedKey);
         Assert.Same(posts, receivedPosts);
+        Assert.Null(service.LastDateRange);
+    }
+
+    [Fact]
+    public async Task Recognize_WithDateRange_PassesRangeToService()
+    {
+        var service = new FakeEventService(recognize: (_, _, _) => Task.FromResult(new RecognitionResponse()));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+        var dateFrom = new DateTime(2026, 9, 1);
+        var dateTo = new DateTime(2026, 9, 30);
+
+        var result = await controller.Recognize(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, dateFrom, dateTo, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(new DateRange(dateFrom, dateTo), service.LastDateRange);
+    }
+
+    [Fact]
+    public async Task Recognize_WithOnlyDateFrom_PassesOpenEndedRange()
+    {
+        var service = new FakeEventService(recognize: (_, _, _) => Task.FromResult(new RecognitionResponse()));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+        var dateFrom = new DateTime(2026, 9, 1);
+
+        var result = await controller.Recognize(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, dateFrom, null, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(new DateRange(dateFrom, null), service.LastDateRange);
+    }
+
+    [Fact]
+    public async Task Recognize_WithInvalidRange_Returns400()
+    {
+        var controller = CreateController(new FakeEventService(), new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.Recognize(
+            new List<InstagramPost> { TestData.CreatePost("p1") },
+            new DateTime(2026, 9, 30), new DateTime(2026, 9, 1), CancellationToken.None);
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(badRequest.Value);
+        Assert.Equal("Invalid date range", error.Error);
     }
 
     [Fact]
@@ -88,7 +132,7 @@ public class EventsControllerTests
         var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
 
         var result = await controller.Recognize(
-            new List<InstagramPost> { TestData.CreatePost("p1") }, CancellationToken.None);
+            new List<InstagramPost> { TestData.CreatePost("p1") }, null, null, CancellationToken.None);
 
         var objectResult = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status502BadGateway, objectResult.StatusCode);
@@ -103,7 +147,7 @@ public class EventsControllerTests
         var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
 
         var result = await controller.Recognize(
-            new List<InstagramPost> { TestData.CreatePost("p1") }, CancellationToken.None);
+            new List<InstagramPost> { TestData.CreatePost("p1") }, null, null, CancellationToken.None);
 
         var objectResult = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status500InternalServerError, objectResult.StatusCode);
@@ -119,7 +163,7 @@ public class EventsControllerTests
         var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
 
         var result = await controller.Recognize(
-            new List<InstagramPost> { TestData.CreatePost("p1") }, CancellationToken.None);
+            new List<InstagramPost> { TestData.CreatePost("p1") }, null, null, CancellationToken.None);
 
         var objectResult = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status500InternalServerError, objectResult.StatusCode);

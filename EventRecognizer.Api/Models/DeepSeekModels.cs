@@ -21,6 +21,26 @@ public class PostAnalysisResult
 
     [JsonPropertyName("summary")]
     public string? Summary { get; set; }
+
+    /// <summary>True when the event repeats over time (weekly pattern or multi-day span).</summary>
+    [JsonPropertyName("is_recurrent")]
+    public bool IsRecurrent { get; set; }
+
+    /// <summary>"weekly" (repeats on weekdays), "daily" (every day within a date span) or null.</summary>
+    [JsonPropertyName("recurrence_type")]
+    public string? RecurrenceType { get; set; }
+
+    /// <summary>Weekdays the event repeats on: 1 = Monday ... 7 = Sunday. E.g. "lunes a jueves" → [1,2,3,4].</summary>
+    [JsonPropertyName("recurrence_days_of_week")]
+    public List<int>? RecurrenceDaysOfWeek { get; set; }
+
+    /// <summary>First day of the recurrence or multi-day span (ISO 8601).</summary>
+    [JsonPropertyName("recurrence_start_date")]
+    public string? RecurrenceStartDate { get; set; }
+
+    /// <summary>Last day of the recurrence or multi-day span (ISO 8601). Null when open-ended.</summary>
+    [JsonPropertyName("recurrence_end_date")]
+    public string? RecurrenceEndDate { get; set; }
 }
 
 /// <summary>

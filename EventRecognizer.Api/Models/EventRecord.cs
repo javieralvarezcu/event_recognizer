@@ -44,6 +44,35 @@ public class EventRecord
     [MaxLength(2000)]
     public string Summary { get; set; } = string.Empty;
 
+    // --- Recurrence (optional, populated when the LLM detects a repeating event) ---
+
+    /// <summary>
+    /// Whether the event repeats over time (weekly pattern or multi-day span).
+    /// </summary>
+    public bool IsRecurrent { get; set; }
+
+    /// <summary>
+    /// "weekly" (repeats on weekdays), "daily" (every day within a date span) or null.
+    /// </summary>
+    [MaxLength(20)]
+    public string? RecurrenceType { get; set; }
+
+    /// <summary>
+    /// Comma-separated weekday numbers (1 = Monday ... 7 = Sunday), e.g. "1,2,3,4".
+    /// </summary>
+    [MaxLength(50)]
+    public string? RecurrenceDaysOfWeek { get; set; }
+
+    /// <summary>
+    /// First day of the recurrence or multi-day span.
+    /// </summary>
+    public DateTime? RecurrenceStartDate { get; set; }
+
+    /// <summary>
+    /// Last day of the recurrence or multi-day span. Null when open-ended.
+    /// </summary>
+    public DateTime? RecurrenceEndDate { get; set; }
+
     // Original Instagram post data
     [Required]
     [MaxLength(200)]

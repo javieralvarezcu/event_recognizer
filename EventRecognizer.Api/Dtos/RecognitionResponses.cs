@@ -22,6 +22,13 @@ public class RecognizedEventDto
     public string? EventDateDescription { get; set; }
     public string? Summary { get; set; }
 
+    // --- Recurrence fields (populated only when IsEvent == true) ---
+    public bool IsRecurrent { get; set; }
+    public string? RecurrenceType { get; set; }
+    public string? RecurrenceDaysOfWeek { get; set; }
+    public DateTime? RecurrenceStartDate { get; set; }
+    public DateTime? RecurrenceEndDate { get; set; }
+
     // --- Original post fields (always populated) ---
     public string Account { get; set; } = string.Empty;
     public string PostId { get; set; } = string.Empty;
@@ -39,6 +46,11 @@ public class EventDetailResponse
     public DateTime? EventDate { get; set; }
     public string? EventDateDescription { get; set; }
     public string Summary { get; set; } = string.Empty;
+    public bool IsRecurrent { get; set; }
+    public string? RecurrenceType { get; set; }
+    public string? RecurrenceDaysOfWeek { get; set; }
+    public DateTime? RecurrenceStartDate { get; set; }
+    public DateTime? RecurrenceEndDate { get; set; }
     public string Account { get; set; } = string.Empty;
     public string PostId { get; set; } = string.Empty;
     public string Caption { get; set; } = string.Empty;

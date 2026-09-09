@@ -23,17 +23,29 @@ public class EventService : IEventService
     public async Task<RecognitionResponse> RecognizeEventsAsync(
         List<InstagramPost> posts,
         string deepSeekApiKey,
+        DateRange? dateRange = null,
         CancellationToken ct = default)
     {
         // 1. Send all posts to DeepSeek for analysis
-        var analyses = await _deepSeekService.AnalyzePostsAsync(posts, deepSeekApiKey, ct);
+        var analyses = await _deepSeekService.AnalyzePostsAsync(posts, deepSeekApiKey, dateRange, ct);
 
-        // 2. Build event records for posts identified as events.
+        // 2. Decide which posts are valid events for the requested date range. A post is
+        //    valid when the LLM says it is an event AND, if a range was requested, the
+        //    event (or its recurrence) occurs within that range.
+        var isValidEvent = new bool[analyses.Count];
+        for (var i = 0; i < analyses.Count; i++)
+        {
+            isValidEvent[i] = analyses[i].IsEvent
+                && (dateRange == null
+                    || RecurrenceEvaluator.OccursInRange(analyses[i], dateRange.From, dateRange.To));
+        }
+
+        // 3. Build event records for valid event posts.
         //    Keyed by PostId so repeated posts within the same batch are only processed once.
         var eventPosts = new Dictionary<string, EventRecord>();
         for (int i = 0; i < posts.Count && i < analyses.Count; i++)
         {
-            if (!analyses[i].IsEvent)
+            if (!isValidEvent[i])
                 continue;
 
             var post = posts[i];
@@ -49,6 +61,13 @@ public class EventService : IEventService
                 EventDate = ParseEventDate(analysis.EventDate),
                 EventDateDescription = analysis.EventDateDescription,
                 Summary = analysis.Summary ?? "Sin resumen",
+                IsRecurrent = analysis.IsRecurrent,
+                RecurrenceType = string.IsNullOrWhiteSpace(analysis.RecurrenceType)
+                    ? null
+                    : Truncate(analysis.RecurrenceType, 20),
+                RecurrenceDaysOfWeek = FormatRecurrenceDays(analysis.RecurrenceDaysOfWeek),
+                RecurrenceStartDate = ParseEventDate(analysis.RecurrenceStartDate),
+                RecurrenceEndDate = ParseEventDate(analysis.RecurrenceEndDate),
                 Account = post.Account,
                 PostId = post.PostId,
                 Caption = Truncate(post.Caption, 4000),
@@ -61,7 +80,7 @@ public class EventService : IEventService
             eventPosts[post.PostId] = eventRecord;
         }
 
-        // 3. Check for duplicates (skip existing post_ids) and persist only new events
+        // 4. Check for duplicates (skip existing post_ids) and persist only new events
         var eventRecords = eventPosts.Values.ToList();
 
         var existingPostIds = await _dbContext.EventRecords
@@ -112,14 +131,14 @@ public class EventService : IEventService
             }
         }
 
-        // 4. Fetch existing events from DB so we return full data for duplicates too
+        // 5. Fetch existing events from DB so we return full data for duplicates too
         var allEventPostIds = eventRecords.Select(e => e.PostId).ToHashSet();
         var existingEvents = await _dbContext.EventRecords
             .Where(e => allEventPostIds.Contains(e.PostId))
             .ToListAsync(ct);
 
-        // 5. Build response — return ALL posts (event + non-event)
-        return MapToResponse(posts, analyses, existingEvents);
+        // 6. Build response — return ALL posts (event + non-event)
+        return MapToResponse(posts, analyses, existingEvents, isValidEvent);
     }
 
     public async Task<EventDetailResponse?> GetEventByUniqueIdAsync(string eventUniqueId, CancellationToken ct = default)
@@ -155,7 +174,8 @@ public class EventService : IEventService
     private static RecognitionResponse MapToResponse(
         List<InstagramPost> posts,
         List<PostAnalysisResult> analyses,
-        List<EventRecord> dbEvents)
+        List<EventRecord> dbEvents,
+        bool[] isValidEvent)
     {
         var dbEventsByPostId = dbEvents.ToDictionary(e => e.PostId);
 
@@ -167,16 +187,14 @@ public class EventService : IEventService
             if (!seenPostIds.Add(post.PostId))
                 continue;
 
-            var analysis = analyses[i];
-
-            if (analysis.IsEvent && dbEventsByPostId.TryGetValue(post.PostId, out var dbEvent))
+            if (isValidEvent[i] && dbEventsByPostId.TryGetValue(post.PostId, out var dbEvent))
             {
-                // Event post — return full event data from DB
+                // Valid event post — return full event data from DB
                 results.Add(MapToDto(dbEvent, isEvent: true));
             }
             else
             {
-                // Non-event post — return only post fields, no event data
+                // Non-event (or out-of-range) post — return only post fields, no event data
                 results.Add(new RecognizedEventDto
                 {
                     IsEvent = false,
@@ -209,6 +227,11 @@ public class EventService : IEventService
             EventDate = e.EventDate,
             EventDateDescription = e.EventDateDescription,
             Summary = e.Summary,
+            IsRecurrent = e.IsRecurrent,
+            RecurrenceType = e.RecurrenceType,
+            RecurrenceDaysOfWeek = e.RecurrenceDaysOfWeek,
+            RecurrenceStartDate = e.RecurrenceStartDate,
+            RecurrenceEndDate = e.RecurrenceEndDate,
             Account = e.Account,
             PostId = e.PostId,
             Caption = e.Caption,
@@ -227,6 +250,12 @@ public class EventService : IEventService
         return value.Length <= maxLength ? value : value[..maxLength];
     }
 
+    /// <summary>
+    /// Stores the LLM weekday list as a comma-separated string ("1,2,3,4") for the DB column.
+    /// </summary>
+    private static string? FormatRecurrenceDays(List<int>? days)
+        => days is { Count: > 0 } ? string.Join(",", days) : null;
+
     private static EventDetailResponse MapToDetailDto(EventRecord e)
     {
         return new EventDetailResponse
@@ -236,6 +265,11 @@ public class EventService : IEventService
             EventDate = e.EventDate,
             EventDateDescription = e.EventDateDescription,
             Summary = e.Summary,
+            IsRecurrent = e.IsRecurrent,
+            RecurrenceType = e.RecurrenceType,
+            RecurrenceDaysOfWeek = e.RecurrenceDaysOfWeek,
+            RecurrenceStartDate = e.RecurrenceStartDate,
+            RecurrenceEndDate = e.RecurrenceEndDate,
             Account = e.Account,
             PostId = e.PostId,
             Caption = e.Caption,

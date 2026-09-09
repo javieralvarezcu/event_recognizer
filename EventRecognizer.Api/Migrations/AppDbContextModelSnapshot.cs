@@ -59,6 +59,9 @@ namespace EventRecognizer.Api.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
 
+                    b.Property<bool>("IsRecurrent")
+                        .HasColumnType("bit");
+
                     b.Property<DateTime?>("PostDatetime")
                         .HasColumnType("datetime2");
 
@@ -66,6 +69,20 @@ namespace EventRecognizer.Api.Migrations
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("RecurrenceDaysOfWeek")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTime?>("RecurrenceEndDate")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("RecurrenceStartDate")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RecurrenceType")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("Summary")
                         .IsRequired()

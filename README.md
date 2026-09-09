@@ -27,11 +27,12 @@ Event Recognizer es una API REST que analiza publicaciones de Instagram y detect
 
 El flujo de reconocimiento:
 
-1. El cliente envía un lote de posts de Instagram a `POST /api/events/recognize` junto con su API key de DeepSeek.
-2. El servidor formatea los posts y los envía a DeepSeek con un prompt en español.
-3. DeepSeek analiza cada post y devuelve un JSON estructurado indicando si es evento, título, fecha y resumen.
-4. Los eventos detectados se persisten en SQL Server (con deduplicación por `PostId`).
-5. Se devuelven **todos** los posts al cliente — tanto los clasificados como evento como los que no — con la información estructurada correspondiente.
+1. El cliente envía un lote de posts de Instagram a `POST /api/events/recognize` junto con su API key de DeepSeek y, opcionalmente, un rango de fechas (`dateFrom`/`dateTo`).
+2. El servidor formatea los posts y los envía a DeepSeek con un prompt en español (incluye el rango solicitado como contexto y exige resolver fechas aproximadas o de eventos con nombre propio).
+3. DeepSeek analiza cada post y devuelve un JSON estructurado indicando si es evento, título, fecha, resumen y patrón de recurrencia (semanal o rango de días).
+4. Si se solicitó un rango de fechas, el servidor evalúa de forma determinista si cada evento — con fecha concreta o recurrente — ocurre dentro de ese rango; los que no, se tratan como si no fueran eventos.
+5. Los eventos válidos se persisten en SQL Server (con deduplicación por `PostId`).
+6. Se devuelven **todos** los posts al cliente — tanto los clasificados como evento como los que no — con la información estructurada correspondiente.
 
 Los eventos persistidos pueden consultarse posteriormente mediante `GET /api/events/{eventUniqueId}`.
 
@@ -46,6 +47,7 @@ Los eventos persistidos pueden consultarse posteriormente mediante `GET /api/eve
 | ORM | Entity Framework Core 8.0 |
 | Base de datos | SQL Server 2022 (Express) |
 | LLM | DeepSeek Chat API (`deepseek-chat`) |
+| Tests | xUnit + SQLite en memoria |
 | Documentación | Swagger / OpenAPI (Swashbuckle) |
 | Contenedores | Docker + Docker Compose |
 | Túnel (prod) | Cloudflare Tunnel |
@@ -93,7 +95,7 @@ event_recognizer/
 ├── docker-compose.yml                    # Servicios: api + sqlserver
 ├── docker-compose.prod.yml               # Override producción: cloudflared
 ├── README.md
-└── EventRecognizer.Api/
+├── EventRecognizer.Api/
     ├── Dockerfile
     ├── .dockerignore
     ├── EventRecognizer.Api.csproj
@@ -110,10 +112,9 @@ event_recognizer/
     ├── Dtos/
     │   └── RecognitionResponses.cs       # DTOs de respuesta de la API
     ├── Migrations/
-    │   ├── 20260728134454_InitialCreate.cs
-    │   ├── 20260728134550_IncreaseCaptionMaxLength.cs
-    │   └── AppDbContextModelSnapshot.cs
+    │   └── 20260902013644_InitialCreate.cs
     ├── Models/
+    │   ├── DateRange.cs                  # Rango de fechas opcional (from/to)
     │   ├── DeepSeekModels.cs             # DTOs para la API de DeepSeek
     │   ├── EventRecord.cs                # Entidad de base de datos
     │   └── InstagramPost.cs              # DTO de entrada (post de Instagram)
@@ -121,7 +122,14 @@ event_recognizer/
         ├── IDeepSeekService.cs
         ├── DeepSeekService.cs            # Cliente HTTP para DeepSeek
         ├── IEventService.cs
-        └── EventService.cs               # Orquestador de reconocimiento
+        ├── EventService.cs               # Orquestador de reconocimiento
+        └── RecurrenceEvaluator.cs        # Evalúa si un evento/recurrencia cae en un rango
+└── EventRecognizer.Api.Tests/           # Proyecto de tests (xUnit + SQLite en memoria)
+    ├── TestDoubles.cs                    # Fakes y builders compartidos
+    ├── DeepSeekServiceTests.cs
+    ├── EventServiceTests.cs
+    ├── EventsControllerTests.cs
+    └── RecurrenceEvaluatorTests.cs
 ```
 
 ---
@@ -138,6 +146,29 @@ Analiza un lote de publicaciones de Instagram, detecta cuáles son carteles de e
 |---|---|
 | `X-DeepSeek-API-Key` | Token de API de DeepSeek (proporcionado por el cliente) |
 | `Content-Type` | `application/json` |
+
+**Query params opcionales (rango de fechas):**
+
+| Parámetro | Tipo | Descripción |
+|---|---|---|
+| `dateFrom` | `datetime` | Inicio del rango de fechas de eventos válidos (inclusive). Si se omite, el rango queda abierto por el inicio. |
+| `dateTo` | `datetime` | Fin del rango de fechas de eventos válidos (inclusive). Si se omite, el rango queda abierto por el fin. |
+
+Cuando se indica un rango, un evento solo se considera válido si ocurre dentro de él:
+
+- **Fecha concreta**: el día del evento debe caer en el rango.
+- **Evento recurrente** (`todos los jueves`, `de lunes a viernes`): se incluye si alguna ocurrencia del patrón cae en el rango. Ej: un evento "de lunes 14 a jueves 17 de septiembre" es válido para un rango del 10 al 20 de septiembre, pero no para octubre.
+- **Evento de varios días** (ferias, festivales): se incluye si el evento y el rango se solapan en cualquier día.
+- Un evento que no cae en el rango **no se persiste** y se devuelve como no-evento (mismo flujo que si no se hubiera encontrado evento).
+
+Ejemplos:
+
+```
+POST /api/events/recognize?dateFrom=2026-09-01&dateTo=2026-09-30
+POST /api/events/recognize?dateFrom=2026-09-01            # solo límite inferior
+POST /api/events/recognize?dateTo=2026-09-30              # solo límite superior
+POST /api/events/recognize                                # sin rango: no se filtra
+```
 
 **Request body** (`application/json`):
 
@@ -168,6 +199,11 @@ Analiza un lote de publicaciones de Instagram, detecta cuáles son carteles de e
       "eventDate": "2026-09-19T22:00:00",
       "eventDateDescription": "Sábado 19 de septiembre a las 22:00",
       "summary": "Fiesta de verano en la playa con DJ invitados...",
+      "isRecurrent": false,
+      "recurrenceType": null,
+      "recurrenceDaysOfWeek": null,
+      "recurrenceStartDate": null,
+      "recurrenceEndDate": null,
       "account": "lacasadelaplaya",
       "postId": "ABC123xyz",
       "caption": "Este sábado 19 de septiembre...",
@@ -190,11 +226,36 @@ Analiza un lote de publicaciones de Instagram, detecta cuáles son carteles de e
 }
 ```
 
+Ejemplo de evento recurrente ("todos los jueves desde el 10 de septiembre"):
+
+```json
+{
+  "isEvent": true,
+  "eventUniqueId": "EVT-20260728-B2C3D4E5",
+  "title": "Techno Thursdays",
+  "eventDate": "2026-09-10T23:00:00",
+  "eventDateDescription": "Todos los jueves desde el 10 de septiembre de 2026",
+  "summary": "Noche de techno todos los jueves.",
+  "isRecurrent": true,
+  "recurrenceType": "weekly",
+  "recurrenceDaysOfWeek": "4",
+  "recurrenceStartDate": "2026-09-10T00:00:00",
+  "recurrenceEndDate": null,
+  "account": "club_xyz",
+  "postId": "DEF456uvw",
+  "caption": "TECHNO THURSDAYS · Todos los jueves...",
+  "postDatetime": "2026-09-01T12:00:00",
+  "url": "https://www.instagram.com/p/DEF456uvw/",
+  "imageUrl": null,
+  "createdAt": "2026-09-01T13:00:00Z"
+}
+```
+
 **Códigos de error:**
 
 | Código | Significado |
 |---|---|
-| `400` | Body vacío o sin posts |
+| `400` | Body vacío o sin posts, o rango inválido (`dateFrom` posterior a `dateTo`) |
 | `401` | Falta el header `X-DeepSeek-API-Key` |
 | `500` | Error al parsear la respuesta del LLM |
 | `502` | Error de comunicación con la API de DeepSeek |
@@ -220,6 +281,11 @@ Recupera un evento previamente reconocido por su identificador único.
   "eventDate": "2026-09-19T22:00:00",
   "eventDateDescription": "Sábado 19 de septiembre a las 22:00",
   "summary": "Fiesta de verano en la playa...",
+  "isRecurrent": false,
+  "recurrenceType": null,
+  "recurrenceDaysOfWeek": null,
+  "recurrenceStartDate": null,
+  "recurrenceEndDate": null,
   "account": "lacasadelaplaya",
   "postId": "ABC123xyz",
   "caption": "Este sábado 19 de septiembre...",
@@ -253,6 +319,11 @@ Recupera un evento previamente reconocido por su identificador único.
 | `EventDate` | `datetime2` | NULL | Fecha y hora del evento (ISO 8601) |
 | `EventDateDescription` | `nvarchar(500)` | NULL | Descripción textual si la fecha no es concreta |
 | `Summary` | `nvarchar(2000)` | NOT NULL | Resumen del evento en español (máx. 2 frases) |
+| `IsRecurrent` | `bit` | NOT NULL | Si el evento se repite (patrón semanal o evento de varios días) |
+| `RecurrenceType` | `nvarchar(20)` | NULL | `weekly` (se repite por días de la semana) o `daily` (cada día dentro de un rango) |
+| `RecurrenceDaysOfWeek` | `nvarchar(50)` | NULL | Días de repetición separados por comas: 1=lunes ... 7=domingo. Ej: `1,2,3,4` |
+| `RecurrenceStartDate` | `datetime2` | NULL | Primer día de la recurrencia o del rango de días |
+| `RecurrenceEndDate` | `datetime2` | NULL | Último día de la recurrencia o del rango de días. NULL si es indefinida |
 | `Account` | `nvarchar(200)` | NOT NULL, INDEX | Usuario de Instagram |
 | `PostId` | `nvarchar(100)` | NOT NULL, UNIQUE | ID del post de Instagram |
 | `Caption` | `nvarchar(4000)` | NOT NULL | Texto del caption del post |
@@ -442,6 +513,30 @@ El sistema utiliza un prompt de sistema en español que instruye a DeepSeek a cl
 - ❌ Posts tipo "soon" o "próximamente" sin detalles → **no** son carteles de evento.
 - ❌ Anuncios de merchandising/pre-order → **no** son carteles de evento.
 
+### Resolución de fechas aproximadas
+
+- Si el cartel menciona un evento con nombre propio conocido ("Feria de Córdoba", "San Isidro", "WOMAD"…), el prompt **obliga** al LLM a buscar en su conocimiento la fecha o rango de fechas real de la edición anunciada y rellenar las fechas SÍ O SÍ, aunque el cartel no las diga explícitamente.
+- Las fechas relativas ("este sábado", "el próximo viernes") se resuelven usando la fecha de publicación del post y, cuando se envía, el rango de fechas solicitado por el cliente.
+- El rango solicitado se incluye en el prompt del usuario como contexto, indicando explícitamente al modelo que **no filtre** por él: el filtro final lo aplica el servidor de forma determinista.
+
+### Eventos recurrentes
+
+El prompt pide al LLM devolver el patrón de recurrencia:
+
+| Campo | Significado |
+|---|---|
+| `is_recurrent` | Si el evento se repite en el tiempo |
+| `recurrence_type` | `weekly` (días de la semana) o `daily` (cada día dentro de un rango, p. ej. ferias) |
+| `recurrence_days_of_week` | Días de repetición: 1=lunes ... 7=domingo. "De lunes a jueves" → `[1,2,3,4]` |
+| `recurrence_start_date` | Primer día de la recurrencia o del rango |
+| `recurrence_end_date` | Último día, o `null` si es indefinida ("todos los jueves") |
+
+El servidor evalúa si el evento cae en el rango solicitado con `RecurrenceEvaluator`:
+- Evento con fecha concreta → el día debe estar en el rango.
+- Recurrencia semanal → se comprueba si algún día del patrón cae dentro de la intersección entre la ventana de recurrencia y el rango solicitado.
+- Evento de varios días (feria, festival) → basta con que ventana y rango se solapen.
+- Evento sin ninguna fecha verificable → no se considera válido para el rango.
+
 ### Respuesta esperada del LLM
 
 ```json
@@ -452,7 +547,12 @@ El sistema utiliza un prompt de sistema en español que instruye a DeepSeek a cl
       "title": "Título del evento",
       "event_date": "2026-09-19T22:00:00",
       "event_date_description": "Sábado 19 de septiembre",
-      "summary": "Fiesta de verano con DJ en la playa"
+      "summary": "Fiesta de verano con DJ en la playa",
+      "is_recurrent": false,
+      "recurrence_type": null,
+      "recurrence_days_of_week": null,
+      "recurrence_start_date": null,
+      "recurrence_end_date": null
     }
   ]
 }
@@ -532,8 +632,19 @@ dotnet ef database update \
 
 | Migración | Descripción |
 |---|---|
-| `20260728134454_InitialCreate` | Creación inicial de la tabla `EventRecords` con todos los índices. Idempotente: usa `IF OBJECT_ID` para transicionar desde `EnsureCreated()`. |
-| `20260728134550_IncreaseCaptionMaxLength` | Amplía `Caption` de `nvarchar(500)` a `nvarchar(4000)`. |
+| `20260902013644_InitialCreate` | Creación de la tabla `EventRecords` con los índices y las columnas de recurrencia (`IsRecurrent`, `RecurrenceType`, `RecurrenceDaysOfWeek`, `RecurrenceStartDate`, `RecurrenceEndDate`). |
+
+> ⚠️ **La migración inicial se regeneró** al añadir las columnas de recurrencia. Las bases de datos existentes **deben recrearse**: borra la base de datos (o el volumen `sqlserver-data` con `docker compose down -v`) y deja que la aplicación la cree de nuevo al arrancar.
+
+---
+
+## Tests
+
+El repositorio incluye el proyecto `EventRecognizer.Api.Tests` (xUnit) con tests unitarios para `RecurrenceEvaluator`, `DeepSeekService` (con `HttpMessageHandler` simulado), `EventService` (con SQLite en memoria) y `EventsController`.
+
+```bash
+dotnet test
+```
 
 ---
 

@@ -82,12 +82,16 @@ public sealed class FakeDeepSeekService : IDeepSeekService
 
     public List<string> ReceivedApiKeys { get; } = new();
 
+    public DateRange? LastDateRange { get; private set; }
+
     public Task<List<PostAnalysisResult>> AnalyzePostsAsync(
         List<InstagramPost> posts,
         string apiKey,
+        DateRange? dateRange = null,
         CancellationToken ct = default)
     {
         ReceivedApiKeys.Add(apiKey);
+        LastDateRange = dateRange;
         return Task.FromResult(_analyze(posts, apiKey));
     }
 }
@@ -108,13 +112,19 @@ public sealed class FakeEventService : IEventService
         _getByUniqueId = getByUniqueId;
     }
 
+    public DateRange? LastDateRange { get; private set; }
+
     public Task<RecognitionResponse> RecognizeEventsAsync(
         List<InstagramPost> posts,
         string deepSeekApiKey,
+        DateRange? dateRange = null,
         CancellationToken ct = default)
-        => _recognize != null
+    {
+        LastDateRange = dateRange;
+        return _recognize != null
             ? _recognize(posts, deepSeekApiKey, ct)
             : throw new InvalidOperationException("No recognize delegate configured.");
+    }
 
     public Task<EventDetailResponse?> GetEventByUniqueIdAsync(string eventUniqueId, CancellationToken ct = default)
         => _getByUniqueId != null
@@ -158,6 +168,46 @@ public static class TestData
 
     public static PostAnalysisResult NonEventResult()
         => new() { IsEvent = false };
+
+    /// <summary>
+    /// Weekly recurrence result, e.g. "todos los jueves" (days [4]) starting 2026-09-10.
+    /// </summary>
+    public static PostAnalysisResult WeeklyResult(
+        List<int> daysOfWeek,
+        string start,
+        string? end = null,
+        string title = "Evento semanal")
+        => new()
+        {
+            IsEvent = true,
+            Title = title,
+            EventDate = start,
+            EventDateDescription = "Todos los jueves",
+            Summary = "Evento semanal recurrente",
+            IsRecurrent = true,
+            RecurrenceType = "weekly",
+            RecurrenceDaysOfWeek = daysOfWeek,
+            RecurrenceStartDate = start,
+            RecurrenceEndDate = end
+        };
+
+    /// <summary>
+    /// Multi-day / daily result, e.g. a fair running from start to end.
+    /// </summary>
+    public static PostAnalysisResult DailyRangeResult(string start, string end, string title = "Feria")
+        => new()
+        {
+            IsEvent = true,
+            Title = title,
+            EventDate = start,
+            EventDateDescription = $"Del {start} al {end}",
+            Summary = "Feria de varios días",
+            IsRecurrent = true,
+            RecurrenceType = "daily",
+            RecurrenceDaysOfWeek = null,
+            RecurrenceStartDate = start,
+            RecurrenceEndDate = end
+        };
 
     /// <summary>
     /// Serializes the envelope DeepSeek actually returns: choices[0].message.content holds

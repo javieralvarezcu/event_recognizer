@@ -26,13 +26,20 @@ public class EventsController : ControllerBase
     /// </summary>
     /// <remarks>
     /// Requires the header <c>X-DeepSeek-API-Key</c> with a valid DeepSeek API token.
+    /// Optionally accepts <c>dateFrom</c>/<c>dateTo</c> query parameters with the date range
+    /// of valid events: events (including recurring ones) outside the range are returned
+    /// as non-events and are not persisted.
     /// </remarks>
     [HttpPost("recognize")]
     [ProducesResponseType(typeof(RecognitionResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
-    public async Task<IActionResult> Recognize([FromBody] List<InstagramPost> posts, CancellationToken ct)
+    public async Task<IActionResult> Recognize(
+        [FromBody] List<InstagramPost> posts,
+        [FromQuery] DateTime? dateFrom = null,
+        [FromQuery] DateTime? dateTo = null,
+        CancellationToken ct = default)
     {
         if (posts == null || posts.Count == 0)
         {
@@ -53,9 +60,22 @@ public class EventsController : ControllerBase
             });
         }
 
+        if (dateFrom.HasValue && dateTo.HasValue && dateFrom > dateTo)
+        {
+            return BadRequest(new ErrorResponse
+            {
+                Error = "Invalid date range",
+                Detail = "'dateFrom' must be earlier than or equal to 'dateTo'."
+            });
+        }
+
+        var dateRange = dateFrom.HasValue || dateTo.HasValue
+            ? new DateRange(dateFrom, dateTo)
+            : null;
+
         try
         {
-            var result = await _eventService.RecognizeEventsAsync(posts, deepSeekApiKey, ct);
+            var result = await _eventService.RecognizeEventsAsync(posts, deepSeekApiKey, dateRange, ct);
             return Ok(result);
         }
         catch (InvalidOperationException ex)

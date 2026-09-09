@@ -208,6 +208,155 @@ public class EventServiceTests
         Assert.Null(result);
     }
 
+    private static DateRange Range(string? from, string? to)
+        => new(from == null ? null : DateTime.Parse(from),
+               to == null ? null : DateTime.Parse(to));
+
+    [Fact]
+    public async Task RecognizeEventsAsync_WithRange_PassesRangeToDeepSeekService()
+    {
+        using var fixture = new TestDatabase();
+        var fake = new FakeDeepSeekService((_, _) => new List<PostAnalysisResult>
+        {
+            TestData.NonEventResult()
+        });
+        var service = new EventService(fake, fixture.Db, NullLogger<EventService>.Instance);
+        var range = Range("2026-09-01", "2026-09-30");
+
+        await service.RecognizeEventsAsync(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, "key", range);
+
+        Assert.Equal(range, fake.LastDateRange);
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_WithRange_ExcludesEventOutsideRange()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1") };
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Evento de octubre", "2026-10-01T20:00:00")
+        });
+
+        var response = await service.RecognizeEventsAsync(posts, "key", Range("2026-09-01", "2026-09-30"));
+
+        // Out-of-range events follow the flow as if no event had been found.
+        Assert.Equal(1, response.TotalPosts);
+        Assert.Equal(0, response.EventsFound);
+        Assert.False(response.Events[0].IsEvent);
+        Assert.Equal(0, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_WithRange_IncludesEventInsideRange()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1") };
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Evento de septiembre", "2026-09-19T22:00:00")
+        });
+
+        var response = await service.RecognizeEventsAsync(posts, "key", Range("2026-09-01", "2026-09-30"));
+
+        Assert.Equal(1, response.EventsFound);
+        Assert.True(response.Events[0].IsEvent);
+        Assert.Equal("Evento de septiembre", response.Events[0].Title);
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_WithRange_IncludesRecurrentEventWithinRange()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1") };
+        // "De lunes 14 a jueves 17 de septiembre".
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.WeeklyResult(new List<int> { 1, 2, 3, 4 }, "2026-09-14", "2026-09-17")
+        });
+
+        var response = await service.RecognizeEventsAsync(posts, "key", Range("2026-09-10", "2026-09-20"));
+
+        var eventDto = response.Events[0];
+        Assert.True(eventDto.IsEvent);
+        Assert.True(eventDto.IsRecurrent);
+        Assert.Equal("weekly", eventDto.RecurrenceType);
+        Assert.Equal("1,2,3,4", eventDto.RecurrenceDaysOfWeek);
+        Assert.NotNull(eventDto.RecurrenceStartDate);
+        Assert.NotNull(eventDto.RecurrenceEndDate);
+
+        var stored = await fixture.Db.EventRecords.SingleAsync();
+        Assert.True(stored.IsRecurrent);
+        Assert.Equal("weekly", stored.RecurrenceType);
+        Assert.Equal("1,2,3,4", stored.RecurrenceDaysOfWeek);
+        Assert.NotNull(stored.RecurrenceStartDate);
+        Assert.NotNull(stored.RecurrenceEndDate);
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_WithRange_ExcludesRecurrenceOutsideRange()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1") };
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.WeeklyResult(new List<int> { 1, 2, 3, 4 }, "2026-09-14", "2026-09-17")
+        });
+
+        var response = await service.RecognizeEventsAsync(posts, "key", Range("2026-10-01", "2026-10-31"));
+
+        Assert.Equal(0, response.EventsFound);
+        Assert.False(response.Events[0].IsEvent);
+        Assert.Equal(0, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_WithRange_OpenEndedRecurrence_MatchesLaterRange()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1") };
+        // "Todos los jueves desde el 10 de septiembre" — range in October (contains Thursdays).
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.WeeklyResult(new List<int> { 4 }, "2026-09-10")
+        });
+
+        var response = await service.RecognizeEventsAsync(posts, "key", Range("2026-10-01", "2026-10-31"));
+
+        Assert.Equal(1, response.EventsFound);
+        Assert.True(response.Events[0].IsEvent);
+        Assert.True(response.Events[0].IsRecurrent);
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_WithoutRange_PersistsRecurrenceColumns()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1") };
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.DailyRangeResult("2026-05-23", "2026-05-30", "Feria de Córdoba")
+        });
+
+        var response = await service.RecognizeEventsAsync(posts, "key");
+
+        var eventDto = response.Events[0];
+        Assert.True(eventDto.IsEvent);
+        Assert.True(eventDto.IsRecurrent);
+        Assert.Equal("daily", eventDto.RecurrenceType);
+        Assert.Null(eventDto.RecurrenceDaysOfWeek);
+
+        var stored = await fixture.Db.EventRecords.SingleAsync();
+        Assert.True(stored.IsRecurrent);
+        Assert.Equal("daily", stored.RecurrenceType);
+        Assert.Null(stored.RecurrenceDaysOfWeek);
+        Assert.NotNull(stored.RecurrenceStartDate);
+        Assert.NotNull(stored.RecurrenceEndDate);
+    }
+
     /// <summary>
     /// In-memory SQLite database for a single test. The DB lives on the open connection,
     /// so the connection must stay open for the whole test and is disposed here.

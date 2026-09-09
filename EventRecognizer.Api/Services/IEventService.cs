@@ -13,10 +13,14 @@ public interface IEventService
     /// </summary>
     /// <param name="posts">The Instagram posts to analyze.</param>
     /// <param name="deepSeekApiKey">The DeepSeek API key from the request header.</param>
+    /// <param name="dateRange">Optional date range of valid events. When provided, an event is
+    /// only considered found if it (or its recurrence) occurs within the range; otherwise the
+    /// post is returned as a non-event and nothing is persisted for it.</param>
     /// <param name="ct">Cancellation token.</param>
     Task<RecognitionResponse> RecognizeEventsAsync(
         List<InstagramPost> posts,
         string deepSeekApiKey,
+        DateRange? dateRange = null,
         CancellationToken ct = default);
 
     /// <summary>

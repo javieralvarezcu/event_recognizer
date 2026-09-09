@@ -227,4 +227,65 @@ public class DeepSeekServiceTests
         }
         Assert.All(results.Skip(20), r => Assert.False(r.IsEvent));
     }
+
+    [Fact]
+    public async Task AnalyzePostsAsync_WithDateRange_IncludesRangeInUserPrompt()
+    {
+        var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
+
+        await _service.AnalyzePostsAsync(posts, "key",
+            new DateRange(new DateTime(2026, 9, 1), new DateTime(2026, 9, 30)));
+
+        var body = Assert.Single(_handler.RequestBodies);
+        Assert.Contains("RANGO DE FECHAS SOLICITADO", body);
+        Assert.Contains("Desde: 2026-09-01", body);
+        Assert.Contains("Hasta: 2026-09-30", body);
+    }
+
+    [Fact]
+    public async Task AnalyzePostsAsync_WithoutDateRange_OmitsRangeFromPrompt()
+    {
+        var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
+
+        await _service.AnalyzePostsAsync(posts, "key");
+
+        var body = Assert.Single(_handler.RequestBodies);
+        Assert.DoesNotContain("RANGO DE FECHAS SOLICITADO", body);
+    }
+
+    [Fact]
+    public async Task AnalyzePostsAsync_WithOpenEndedRange_FormatsMissingBounds()
+    {
+        var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
+
+        await _service.AnalyzePostsAsync(posts, "key", new DateRange(new DateTime(2026, 9, 1), null));
+
+        // Deserialize the payload: System.Text.Json escapes non-ASCII chars, so the
+        // assertions must run on the decoded prompt text, not the raw JSON body.
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(Assert.Single(_handler.RequestBodies)!)!;
+        var userPrompt = payload.Messages[1].Content;
+        Assert.Contains("Desde: 2026-09-01", userPrompt);
+        Assert.Contains("Hasta: (sin límite)", userPrompt);
+    }
+
+    [Fact]
+    public async Task AnalyzePostsAsync_SystemPrompt_InstructsRecurrenceAndNamedEventResolution()
+    {
+        var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
+
+        await _service.AnalyzePostsAsync(posts, "key");
+
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(Assert.Single(_handler.RequestBodies)!)!;
+        // The system prompt must carry the recurrence schema, the SÍ O SÍ named-event
+        // date rule and the few-shot example.
+        var systemPrompt = payload.Messages[0].Content;
+        Assert.Contains("recurrence_days_of_week", systemPrompt);
+        Assert.Contains("recurrence_type", systemPrompt);
+        Assert.Contains("SÍ O SÍ", systemPrompt);
+        Assert.Contains("Feria de Córdoba", systemPrompt);
+    }
 }
