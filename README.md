@@ -648,7 +648,7 @@ Swagger UI sigue disponible en `/swagger`.
 
 La API puede cruzar sus eventos con el calendario público de [muxojaleo.com](https://muxojaleo.com/calendario):
 
-- **Scraping sin navegador**: la página es una app Astro que renderiza los eventos dentro de un tag `astro-island` con las props serializadas (formato seroval), así que `MuxoScraperService` la pide por HTTP con `?month=yyyy-MM` y parsea el HTML con una regex + `System.Text.Json`. No se usa headless browser.
+- **Scraping sin navegador**: la web de muxojaleo es una app Astro que solo renderiza una parte de los eventos en el HTML y carga el resto desde su propia API JSON en el cliente. `MuxoScraperService` combina dos fuentes: el listado `/eventos` (todos los eventos publicados, con lugar y categorías ya resueltos, serializados en un tag `astro-island` en formato seroval) y la API `/api/events?from=&to=` de cada rango mensual (fuente del propio calendario, completa por rango) como respaldo. No se usa headless browser.
 - **Persistencia**: los eventos de muxojaleo se guardan en la tabla `MuxoEvents` (clave única `ExternalId`). Solo se raspa y se llama al LLM al pulsar el botón; las ejecuciones repetidas no duplican nada (y actualizan los campos si el sitio los cambió).
 - **Cruce con LLM**: `DeepSeekService.FindCrossMatchesAsync` envía ambas listas y el modelo devuelve los pares `{event_unique_id, muxo_event_id, reason}`. El servidor solo persiste pares válidos (ambos IDs existentes) y no duplicados; cada evento y cada evento de muxojaleo se cruza como máximo una vez.
 - **Display**: `GET /api/events` devuelve `isCrossed` + los datos del evento de muxojaleo; el panel pinta esos eventos en verde y permite filtrarlos con el check "Mostrar eventos cruzados".
