@@ -20,4 +20,18 @@ public interface IDeepSeekService
         string apiKey,
         DateRange? dateRange = null,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Asks the LLM to group the given events into duplicate sets (same real-world event),
+    /// returning for each group the id to keep and the ids to delete.
+    /// </summary>
+    /// <param name="events">The persisted events to compare. Only these ids may be referenced.</param>
+    /// <param name="monthLabel">The month being cleaned, "yyyy-MM", for context.</param>
+    /// <param name="apiKey">The DeepSeek API key provided by the client in the request header.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<List<DuplicateGroupResult>> FindDuplicateEventsAsync(
+        List<CleanupEventItem> events,
+        string monthLabel,
+        string apiKey,
+        CancellationToken ct = default);
 }

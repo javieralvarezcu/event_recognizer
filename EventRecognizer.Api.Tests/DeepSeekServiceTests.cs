@@ -288,4 +288,100 @@ public class DeepSeekServiceTests
         Assert.Contains("SÍ O SÍ", systemPrompt);
         Assert.Contains("Feria de Córdoba", systemPrompt);
     }
+
+    private static List<CleanupEventItem> CreateCleanupEvents()
+        => new()
+        {
+            new CleanupEventItem
+            {
+                EventUniqueId = "EVT-1",
+                Title = "Fiesta jueves",
+                Summary = "Fiesta semanal",
+                EventDate = new DateTime(2026, 9, 10),
+                Account = "club_x",
+                Caption = "Todos los jueves fiesta"
+            },
+            new CleanupEventItem
+            {
+                EventUniqueId = "EVT-2",
+                Title = "Jueves de fiesta",
+                Summary = "Fiesta semanal",
+                Account = "club_x"
+            }
+        };
+
+    [Fact]
+    public async Task FindDuplicateEventsAsync_WithEmptyEvents_ReturnsEmptyWithoutCallingApi()
+    {
+        var groups = await _service.FindDuplicateEventsAsync(new List<CleanupEventItem>(), "2026-09", "key");
+
+        Assert.Empty(groups);
+        Assert.Empty(_handler.Requests);
+    }
+
+    [Fact]
+    public async Task FindDuplicateEventsAsync_WithValidResponse_ReturnsParsedGroups()
+    {
+        var groups = new List<DuplicateGroupResult>
+        {
+            new()
+            {
+                KeepEventId = "EVT-1",
+                DuplicateEventIds = new List<string> { "EVT-2" },
+                Reason = "Mismo evento"
+            }
+        };
+        _handler.Enqueue(HttpStatusCode.OK, TestData.BuildCleanupDeepSeekResponse(groups));
+
+        var result = await _service.FindDuplicateEventsAsync(CreateCleanupEvents(), "2026-09", "test-api-key");
+
+        var group = Assert.Single(result);
+        Assert.Equal("EVT-1", group.KeepEventId);
+        Assert.Equal("EVT-2", Assert.Single(group.DuplicateEventIds));
+        Assert.Equal("Mismo evento", group.Reason);
+
+        var request = Assert.Single(_handler.Requests);
+        Assert.Equal("Bearer test-api-key", request.Headers.Authorization!.ToString());
+        var body = Assert.Single(_handler.RequestBodies);
+        Assert.Contains("EVT-1", body);
+        Assert.Contains("2026-09", body);
+    }
+
+    [Fact]
+    public async Task FindDuplicateEventsAsync_WithMalformedContent_RetriesThenThrows()
+    {
+        // Valid envelope, but the inner content is not parseable JSON: each attempt
+        // fails to deserialize, retries are exhausted, and the caller gets an exception.
+        var envelope = JsonSerializer.Serialize(new DeepSeekResponse
+        {
+            Choices = new List<DeepSeekChoice>
+            {
+                new()
+                {
+                    Message = new DeepSeekChoiceMessage { Content = "esto no es json" },
+                    FinishReason = "stop"
+                }
+            }
+        });
+        for (var i = 0; i < 3; i++)
+            _handler.Enqueue(HttpStatusCode.OK, envelope);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.FindDuplicateEventsAsync(CreateCleanupEvents(), "2026-09", "key"));
+        Assert.Equal(3, _handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task FindDuplicateEventsAsync_CleanupPrompts_MentionNoDateCrossing()
+    {
+        _handler.Enqueue(HttpStatusCode.OK, TestData.BuildCleanupDeepSeekResponse(new List<DuplicateGroupResult>()));
+
+        await _service.FindDuplicateEventsAsync(CreateCleanupEvents(), "2026-09", "key");
+
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(Assert.Single(_handler.RequestBodies)!)!;
+        var systemPrompt = payload.Messages[0].Content;
+        Assert.Contains("duplicate_groups", systemPrompt);
+        Assert.Contains("SIN FECHA", systemPrompt);
+        Assert.Contains("NO te fíes solo del título", systemPrompt);
+    }
 }

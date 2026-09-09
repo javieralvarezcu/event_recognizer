@@ -40,7 +40,9 @@ public class DeepSeekService : IDeepSeekService
         {
             var chunk = posts.GetRange(offset, Math.Min(PostsPerChunk, posts.Count - offset));
 
-            var chunkResults = await AnalyzeChunkWithRetriesAsync(chunk, apiKey, dateRange, ct);
+            var chunkResults = await SendChatWithRetriesAsync(
+                BuildSystemPrompt(), BuildUserPrompt(chunk, dateRange), apiKey, maxTokens: 4096,
+                ParseBatchAnalysis, ct);
             if (chunkResults == null)
             {
                 // Exhausted all attempts: fail gracefully and treat the chunk as
@@ -64,10 +66,66 @@ public class DeepSeekService : IDeepSeekService
         return results.ToList();
     }
 
-    private async Task<List<PostAnalysisResult>?> AnalyzeChunkWithRetriesAsync(
-        List<InstagramPost> chunk,
+    private List<PostAnalysisResult> ParseBatchAnalysis(string content)
+    {
+        try
+        {
+            var result = JsonSerializer.Deserialize<BatchAnalysisResult>(content);
+            return result?.Results ?? new List<PostAnalysisResult>();
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize DeepSeek response: {Content}",
+                content[..Math.Min(500, content.Length)]);
+            throw new InvalidOperationException("The LLM returned an unexpected response format.", ex);
+        }
+    }
+
+    public async Task<List<DuplicateGroupResult>> FindDuplicateEventsAsync(
+        List<CleanupEventItem> events,
+        string monthLabel,
         string apiKey,
-        DateRange? dateRange,
+        CancellationToken ct = default)
+    {
+        if (events.Count == 0)
+            return new List<DuplicateGroupResult>();
+
+        var groups = await SendChatWithRetriesAsync(
+            BuildCleanupSystemPrompt(), BuildCleanupUserPrompt(events, monthLabel), apiKey, maxTokens: 8192,
+            ParseDuplicateCleanup, ct);
+        if (groups == null)
+            throw new InvalidOperationException(
+                $"The LLM failed to return a valid response for the month cleanup after {MaxAttempts} attempts.");
+
+        return groups;
+    }
+
+    private List<DuplicateGroupResult> ParseDuplicateCleanup(string content)
+    {
+        try
+        {
+            var result = JsonSerializer.Deserialize<DuplicateCleanupResult>(content);
+            return result?.DuplicateGroups ?? new List<DuplicateGroupResult>();
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize cleanup response: {Content}",
+                content[..Math.Min(500, content.Length)]);
+            throw new InvalidOperationException("The LLM returned an unexpected response format.", ex);
+        }
+    }
+
+    /// <summary>
+    /// Sends one chat request with retries and returns the parsed result, or null when
+    /// all attempts produced malformed responses. Transient HTTP errors rethrow after
+    /// the last attempt so callers can return 502 instead of fake results.
+    /// </summary>
+    private async Task<T?> SendChatWithRetriesAsync<T>(
+        string systemPrompt,
+        string userPrompt,
+        string apiKey,
+        int maxTokens,
+        Func<string, T> parse,
         CancellationToken ct)
     {
         var attempt = 1;
@@ -75,7 +133,8 @@ public class DeepSeekService : IDeepSeekService
         {
             try
             {
-                return await AnalyzeChunkAsync(chunk, apiKey, dateRange, ct);
+                var content = await SendChatOnceAsync(systemPrompt, userPrompt, apiKey, maxTokens, ct);
+                return parse(content);
             }
             catch (InvalidOperationException ex)
             {
@@ -84,7 +143,7 @@ public class DeepSeekService : IDeepSeekService
                     _logger.LogError(ex,
                         "DeepSeek returned an unexpected response format after {MaxAttempts} attempts",
                         MaxAttempts);
-                    return null;
+                    return default;
                 }
 
                 // Truncated/malformed JSON from the LLM: worth retrying — the model
@@ -123,15 +182,13 @@ public class DeepSeekService : IDeepSeekService
             or HttpStatusCode.BadGateway
             or HttpStatusCode.ServiceUnavailable;
 
-    private async Task<List<PostAnalysisResult>> AnalyzeChunkAsync(
-        List<InstagramPost> posts,
+    private async Task<string> SendChatOnceAsync(
+        string systemPrompt,
+        string userPrompt,
         string apiKey,
-        DateRange? dateRange,
+        int maxTokens,
         CancellationToken ct)
     {
-        var systemPrompt = BuildSystemPrompt();
-        var userPrompt = BuildUserPrompt(posts, dateRange);
-
         var requestPayload = new DeepSeekRequest
         {
             Model = "deepseek-chat",
@@ -142,7 +199,7 @@ public class DeepSeekService : IDeepSeekService
             },
             ResponseFormat = new DeepSeekResponseFormat { Type = "json_object" },
             Temperature = 0.3,
-            MaxTokens = 4096
+            MaxTokens = maxTokens
         };
 
         var json = JsonSerializer.Serialize(requestPayload);
@@ -152,8 +209,6 @@ public class DeepSeekService : IDeepSeekService
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
         requestMessage.Headers.Add("Authorization", $"Bearer {apiKey}");
-
-        _logger.LogInformation("Sending {Count} posts to DeepSeek for analysis", posts.Count);
 
         var httpClient = _httpClientFactory.CreateClient("DeepSeek");
         var response = await httpClient.SendAsync(requestMessage, ct);
@@ -188,17 +243,7 @@ public class DeepSeekService : IDeepSeekService
 
         _logger.LogInformation("Raw DeepSeek response received ({Length} chars)", responseContent.Length);
 
-        try
-        {
-            var result = JsonSerializer.Deserialize<BatchAnalysisResult>(responseContent);
-            return result?.Results ?? new List<PostAnalysisResult>();
-        }
-        catch (JsonException ex)
-        {
-            _logger.LogWarning(ex, "Failed to deserialize DeepSeek response: {Content}",
-                responseContent[..Math.Min(500, responseContent.Length)]);
-            throw new InvalidOperationException("The LLM returned an unexpected response format.", ex);
-        }
+        return responseContent;
     }
 
     private static string BuildSystemPrompt()
@@ -337,6 +382,63 @@ public class DeepSeekService : IDeepSeekService
             sb.AppendLine($"datetime: {(post.Datetime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "null")}");
             sb.AppendLine($"url: {post.Url}");
             sb.AppendLine();
+        }
+
+        return sb.ToString();
+    }
+
+    private static string BuildCleanupSystemPrompt()
+    {
+        return """
+            Eres un asistente especializado en detectar eventos duplicados en un registro de eventos extraídos de publicaciones de Instagram.
+
+            Recibirás una lista de eventos persistidos: los del mes indicado (con fecha concreta o recurrencia que cae en ese mes) y, al final, los eventos sin fecha. Varios de estos eventos pueden ser en realidad EL MISMO evento real anunciado en posts distintos (por ejemplo, la misma fiesta semanal anunciada cada semana, o el mismo concierto publicado por la sala y por el artista).
+
+            Tu tarea: agrupar los eventos que sean el mismo evento real y decidir, por cada grupo, cuál se conserva y cuáles se eliminan por duplicados.
+
+            REGLAS DE COMPARACIÓN (MUY IMPORTANTE):
+            - NO te fíes solo del título: los títulos los genera un LLM y pueden variar entre posts ("Fiesta jueves", "Jueves de fiesta", "Thursday party"). Compara el conjunto: cuenta/lugar, resumen, fecha o patrón de recurrencia, y texto del caption.
+            - Dos eventos son el mismo cuando coinciden el lugar/cuenta Y la fecha (o el mismo patrón de recurrencia, p. ej. ambos "todos los jueves" en la misma cuenta) aunque los títulos difieran.
+            - Si un evento SIN FECHA coincide con un evento CON FECHA del mes (misma cuenta y misma temática/recurrencia), conserva SIEMPRE el que tiene fecha y marca el sin fecha como duplicado.
+            - Si dos eventos sin fecha son el mismo, conserva el más completo (más resumen, más información) y marca el otro.
+            - Si tienes dudas razonables de que sean el mismo evento, NO los agrupes. Ante la duda, conserva todos.
+            - Solo puedes usar los IDs que aparecen en la lista. NUNCA inventes IDs.
+            - Un evento debe aparecer como máximo en un grupo (no lo marques como duplicado en varios grupos a la vez).
+
+            Responde ÚNICAMENTE con un objeto JSON con esta estructura:
+            {
+              "duplicate_groups": [
+                {
+                  "keep_event_id": "ID del evento que se conserva",
+                  "duplicate_event_ids": ["ID del evento duplicado a eliminar", "..."],
+                  "reason": "Motivo breve en español"
+                }
+              ]
+            }
+            Si no hay duplicados, devuelve { "duplicate_groups": [] }.
+            """;
+    }
+
+    private static string BuildCleanupUserPrompt(List<CleanupEventItem> events, string monthLabel)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Mes que se está limpiando: {monthLabel} (los eventos con fecha de este mes y los eventos sin fecha).");
+
+        foreach (var e in events)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"--- EVENTO (ID: {e.EventUniqueId}) ---");
+            sb.AppendLine($"título: {TruncateForPrompt(e.Title, 200)}");
+            sb.AppendLine($"resumen: {TruncateForPrompt(e.Summary, 300)}");
+            sb.AppendLine($"fecha: {(e.EventDate?.ToString("yyyy-MM-dd") ?? "(SIN FECHA)")}");
+            sb.AppendLine($"descripción de fecha: {TruncateForPrompt(e.EventDateDescription, 200)}");
+            sb.AppendLine($"recurrente: {e.IsRecurrent}");
+            sb.AppendLine($"tipo de recurrencia: {e.RecurrenceType ?? "(ninguno)"}");
+            sb.AppendLine($"días de la semana: {(string.IsNullOrWhiteSpace(e.RecurrenceDaysOfWeek) ? "(ninguno)" : e.RecurrenceDaysOfWeek)}");
+            sb.AppendLine($"inicio recurrencia: {e.RecurrenceStartDate?.ToString("yyyy-MM-dd") ?? "(ninguno)"}");
+            sb.AppendLine($"fin recurrencia: {e.RecurrenceEndDate?.ToString("yyyy-MM-dd") ?? "(ninguno)"}");
+            sb.AppendLine($"cuenta: {TruncateForPrompt(e.Account, 100)}");
+            sb.AppendLine($"caption: {TruncateForPrompt(e.Caption, 500)}");
         }
 
         return sb.ToString();

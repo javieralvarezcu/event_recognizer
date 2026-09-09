@@ -229,4 +229,93 @@ public class EventsControllerTests
         var events = Assert.IsType<List<EventDetailResponse>>(ok.Value);
         Assert.Empty(events);
     }
+
+    [Fact]
+    public async Task CleanupMonth_WithMissingMonth_Returns400()
+    {
+        var controller = CreateController(new FakeEventService(), new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.CleanupMonth(null, CancellationToken.None);
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(badRequest.Value);
+        Assert.Equal("Invalid month", error.Error);
+    }
+
+    [Fact]
+    public async Task CleanupMonth_WithInvalidMonth_Returns400()
+    {
+        var controller = CreateController(new FakeEventService(), new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.CleanupMonth("2026-13", CancellationToken.None);
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(badRequest.Value);
+        Assert.Equal("Invalid month", error.Error);
+    }
+
+    [Fact]
+    public async Task CleanupMonth_WithMissingApiKey_Returns401()
+    {
+        var controller = CreateController(new FakeEventService());
+
+        var result = await controller.CleanupMonth("2026-09", CancellationToken.None);
+
+        var unauthorized = Assert.IsType<UnauthorizedObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(unauthorized.Value);
+        Assert.Equal("Missing API key", error.Error);
+    }
+
+    [Fact]
+    public async Task CleanupMonth_WithValidInput_PassesYearAndMonthToService()
+    {
+        int? receivedYear = null;
+        int? receivedMonth = null;
+        string? receivedKey = null;
+        var response = new CleanupResponse { Month = "2026-09", EventsAnalyzed = 1, DeletedCount = 0 };
+        var service = new FakeEventService(cleanup: (year, month, key, _) =>
+        {
+            receivedYear = year;
+            receivedMonth = month;
+            receivedKey = key;
+            return Task.FromResult(response);
+        });
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "secret-key" });
+
+        var result = await controller.CleanupMonth("2026-09", CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Same(response, ok.Value);
+        Assert.Equal(2026, receivedYear);
+        Assert.Equal(9, receivedMonth);
+        Assert.Equal("secret-key", receivedKey);
+    }
+
+    [Fact]
+    public async Task CleanupMonth_WhenServiceThrowsHttpRequestException_Returns502()
+    {
+        var service = new FakeEventService(cleanup: (_, _, _, _) => throw new HttpRequestException("boom"));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.CleanupMonth("2026-09", CancellationToken.None);
+
+        var objectResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, objectResult.StatusCode);
+        var error = Assert.IsType<ErrorResponse>(objectResult.Value);
+        Assert.Equal("Failed to communicate with the LLM service", error.Error);
+    }
+
+    [Fact]
+    public async Task CleanupMonth_WhenServiceThrowsInvalidOperationException_Returns500()
+    {
+        var service = new FakeEventService(cleanup: (_, _, _, _) => throw new InvalidOperationException("malformed"));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.CleanupMonth("2026-09", CancellationToken.None);
+
+        var objectResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status500InternalServerError, objectResult.StatusCode);
+        var error = Assert.IsType<ErrorResponse>(objectResult.Value);
+        Assert.Equal("Failed to process the LLM response", error.Error);
+    }
 }

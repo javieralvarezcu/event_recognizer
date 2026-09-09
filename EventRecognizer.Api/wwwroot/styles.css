@@ -51,6 +51,87 @@ main {
   padding: 0.75rem;
 }
 
+/* Limpieza del mes */
+#cleanup-section {
+  background: #fff;
+  border: 1px solid var(--fc-border-color);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+#cleanup-section h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.2rem;
+}
+
+.cleanup-help {
+  color: #5b6472;
+  font-size: 0.92rem;
+  margin: 0 0 0.75rem;
+}
+
+.cleanup-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+#cleanup-key {
+  flex: 1 1 260px;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--fc-border-color);
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+#cleanup-button {
+  background: var(--fc-button-bg-color);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#cleanup-button:hover:not(:disabled) {
+  background: var(--fc-button-hover-bg-color);
+}
+
+#cleanup-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+#cleanup-result {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+#cleanup-result.ok {
+  background: #e8f5ec;
+  border: 1px solid #2e7d4f;
+  color: #1d4d30;
+}
+
+#cleanup-result.error {
+  background: #fdecea;
+  border: 1px solid #b3261e;
+  color: #7c1d17;
+}
+
+#cleanup-result ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}
+
+#cleanup-result li {
+  margin: 0.15rem 0;
+}
+
 #calendar .fc-event {
   cursor: pointer;
   border-radius: 4px;

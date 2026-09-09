@@ -164,6 +164,139 @@ public class EventService : IEventService
         return records.Select(MapToDetailDto).ToList();
     }
 
+    public async Task<CleanupResponse> CleanupMonthAsync(
+        int year,
+        int month,
+        string deepSeekApiKey,
+        CancellationToken ct = default)
+    {
+        var monthLabel = $"{year:0000}-{month:00}";
+        var monthStart = new DateTime(year, month, 1);
+        var monthEnd = monthStart.AddMonths(1).AddDays(-1);
+
+        var records = await _dbContext.EventRecords.AsNoTracking().ToListAsync(ct);
+
+        // Analyze: events occurring within the month + events without any computable
+        // date (those in the "sin fecha" list, crossed against the month's events).
+        var analyzed = records
+            .Where(r => OccursInMonth(r, monthStart, monthEnd) || HasNoDate(r))
+            .ToList();
+
+        if (analyzed.Count == 0)
+            return new CleanupResponse { Month = monthLabel };
+
+        var items = analyzed.Select(ToCleanupItem).ToList();
+        var groups = await _deepSeekService.FindDuplicateEventsAsync(items, monthLabel, deepSeekApiKey, ct);
+
+        // Only ids that were sent to the LLM can be deleted, and an id chosen as the
+        // keeper of any group is protected. Groups whose keeper is unknown are skipped
+        // entirely so a bogus keeper can't cause a whole group to be deleted.
+        var analyzedIds = analyzed.Select(r => r.EventUniqueId).ToHashSet();
+        var recordsById = analyzed.ToDictionary(r => r.EventUniqueId);
+        var keepIds = groups
+            .Where(g => analyzedIds.Contains(g.KeepEventId))
+            .Select(g => g.KeepEventId)
+            .ToHashSet();
+        var toDelete = groups
+            .Where(g => analyzedIds.Contains(g.KeepEventId))
+            .SelectMany(g => g.DuplicateEventIds)
+            .Where(analyzedIds.Contains)
+            .Where(id => !keepIds.Contains(id))
+            .Distinct()
+            .ToHashSet();
+
+        if (toDelete.Count > 0)
+        {
+            var entities = await _dbContext.EventRecords
+                .Where(e => toDelete.Contains(e.EventUniqueId))
+                .ToListAsync(ct);
+            _dbContext.EventRecords.RemoveRange(entities);
+            await _dbContext.SaveChangesAsync(ct);
+            _logger.LogInformation(
+                "Cleanup removed {Count} duplicate events for month {Month}", entities.Count, monthLabel);
+        }
+
+        var response = new CleanupResponse { Month = monthLabel, EventsAnalyzed = analyzed.Count };
+        foreach (var group in groups)
+        {
+            if (!analyzedIds.Contains(group.KeepEventId))
+                continue;
+
+            var removed = group.DuplicateEventIds
+                .Where(toDelete.Contains)
+                .Select(id => recordsById[id])
+                .ToList();
+            if (removed.Count == 0)
+                continue;
+
+            response.Groups.Add(new CleanupGroupDto
+            {
+                KeepEventId = group.KeepEventId,
+                KeepTitle = recordsById[group.KeepEventId].Title,
+                Removed = removed
+                    .Select(r => new CleanupRemovedDto
+                    {
+                        EventUniqueId = r.EventUniqueId,
+                        Title = r.Title,
+                        Account = r.Account
+                    })
+                    .ToList(),
+                Reason = group.Reason
+            });
+        }
+
+        response.DeletedCount = response.Groups.Sum(g => g.Removed.Count);
+        return response;
+    }
+
+    /// <summary>
+    /// Whether the event (or one of its recurrences) occurs on any day of [from, to].
+    /// Reuses the same day-granularity logic as recognition filtering.
+    /// </summary>
+    private static bool OccursInMonth(EventRecord r, DateTime from, DateTime to)
+    {
+        var analysis = new PostAnalysisResult
+        {
+            EventDate = r.EventDate?.ToString("yyyy-MM-dd"),
+            RecurrenceStartDate = r.RecurrenceStartDate?.ToString("yyyy-MM-dd"),
+            RecurrenceEndDate = r.RecurrenceEndDate?.ToString("yyyy-MM-dd"),
+            RecurrenceDaysOfWeek = ParseRecurrenceDays(r.RecurrenceDaysOfWeek)
+        };
+        return RecurrenceEvaluator.OccursInRange(analysis, from, to);
+    }
+
+    private static bool HasNoDate(EventRecord r)
+        => r.EventDate == null && r.RecurrenceStartDate == null && r.RecurrenceEndDate == null;
+
+    private static CleanupEventItem ToCleanupItem(EventRecord r)
+        => new()
+        {
+            EventUniqueId = r.EventUniqueId,
+            Title = r.Title,
+            Summary = r.Summary,
+            EventDate = r.EventDate,
+            EventDateDescription = r.EventDateDescription,
+            IsRecurrent = r.IsRecurrent,
+            RecurrenceType = r.RecurrenceType,
+            RecurrenceDaysOfWeek = r.RecurrenceDaysOfWeek,
+            RecurrenceStartDate = r.RecurrenceStartDate,
+            RecurrenceEndDate = r.RecurrenceEndDate,
+            Account = r.Account,
+            Caption = r.Caption
+        };
+
+    private static List<int>? ParseRecurrenceDays(string? days)
+    {
+        if (string.IsNullOrWhiteSpace(days))
+            return null;
+
+        return days.Split(',')
+            .Select(s => int.TryParse(s.Trim(), out var n) ? n : (int?)null)
+            .Where(n => n.HasValue)
+            .Select(n => n!.Value)
+            .ToList();
+    }
+
     private static string GenerateEventUniqueId(InstagramPost post, PostAnalysisResult analysis)
     {
         var raw = $"{post.PostId}-{post.Account}-{analysis.Title}";

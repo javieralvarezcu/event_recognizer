@@ -53,11 +53,7 @@ public class EventsController : ControllerBase
         var deepSeekApiKey = Request.Headers[DeepSeekApiKeyHeader].FirstOrDefault();
         if (string.IsNullOrWhiteSpace(deepSeekApiKey))
         {
-            return Unauthorized(new ErrorResponse
-            {
-                Error = "Missing API key",
-                Detail = $"The '{DeepSeekApiKeyHeader}' header is required with a valid DeepSeek API key."
-            });
+            return MissingApiKey();
         }
 
         if (dateFrom.HasValue && dateTo.HasValue && dateFrom > dateTo)
@@ -139,5 +135,89 @@ public class EventsController : ControllerBase
     {
         var events = await _eventService.GetAllEventsAsync(ct);
         return Ok(events);
+    }
+
+    /// <summary>
+    /// Cleans a month of duplicated events: sends the month's events (plus the events
+    /// without any date) to the LLM, which decides which ones are duplicates of the
+    /// same real event, and deletes them keeping one per group.
+    /// </summary>
+    /// <remarks>
+    /// Requires the header <c>X-DeepSeek-API-Key</c> with a valid DeepSeek API token.
+    /// The <c>month</c> query parameter must be in <c>yyyy-MM</c> format.
+    /// </remarks>
+    [HttpPost("cleanup")]
+    [ProducesResponseType(typeof(CleanupResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CleanupMonth([FromQuery] string? month, CancellationToken ct)
+    {
+        if (!TryParseMonth(month, out var year, out var monthNumber))
+        {
+            return BadRequest(new ErrorResponse
+            {
+                Error = "Invalid month",
+                Detail = "The 'month' query parameter is required and must be in yyyy-MM format."
+            });
+        }
+
+        var deepSeekApiKey = Request.Headers[DeepSeekApiKeyHeader].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(deepSeekApiKey))
+        {
+            return MissingApiKey();
+        }
+
+        try
+        {
+            var result = await _eventService.CleanupMonthAsync(year, monthNumber, deepSeekApiKey, ct);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogError(ex, "LLM response parsing error during cleanup");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to process the LLM response",
+                Detail = ex.Message
+            });
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "DeepSeek API call failed during cleanup");
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponse
+            {
+                Error = "Failed to communicate with the LLM service",
+                Detail = ex.Message
+            });
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Failed to save cleanup results to the database");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to save events to the database",
+                Detail = ex.Message
+            });
+        }
+    }
+
+    private UnauthorizedObjectResult MissingApiKey()
+        => Unauthorized(new ErrorResponse
+        {
+            Error = "Missing API key",
+            Detail = $"The '{DeepSeekApiKeyHeader}' header is required with a valid DeepSeek API key."
+        });
+
+    private static bool TryParseMonth(string? month, out int year, out int monthNumber)
+    {
+        year = 0;
+        monthNumber = 0;
+        return !string.IsNullOrWhiteSpace(month)
+            && DateTime.TryParseExact(month, "yyyy-MM",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var parsed)
+            && (year = parsed.Year) > 0
+            && (monthNumber = parsed.Month) > 0;
     }
 }

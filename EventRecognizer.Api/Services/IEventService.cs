@@ -33,4 +33,19 @@ public interface IEventService
     /// start), then creation time. Events without any computable date come last.
     /// </summary>
     Task<List<EventDetailResponse>> GetAllEventsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Cleans a month of duplicated events: sends the month's events (plus the events
+    /// without any date) to the LLM, which groups duplicates, and deletes all events
+    /// marked as duplicates except the one kept per group.
+    /// </summary>
+    /// <param name="year">Year of the month to clean.</param>
+    /// <param name="month">Month to clean (1-12).</param>
+    /// <param name="deepSeekApiKey">The DeepSeek API key from the request header.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<CleanupResponse> CleanupMonthAsync(
+        int year,
+        int month,
+        string deepSeekApiKey,
+        CancellationToken ct = default);
 }

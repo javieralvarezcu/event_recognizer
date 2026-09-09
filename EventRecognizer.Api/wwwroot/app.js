@@ -5,6 +5,9 @@ const DAY_NAMES = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábad
 
 const $ = (id) => document.getElementById(id);
 
+/** Mes visible en el calendario, "YYYY-MM". Se actualiza en cada datesSet. */
+let currentMonth = null;
+
 function escapeHtml(text) {
   return String(text)
     .replaceAll('&', '&amp;')
@@ -186,6 +189,12 @@ function renderCalendar(events) {
     buttonText: { today: 'Hoy', month: 'Mes', list: 'Lista' },
     displayEventEnd: false,
     events: events.map(buildCalendarEvent).filter(Boolean),
+    datesSet: (info) => {
+      // El mes mostrado = el del punto medio del rango visible (el inicio del rango
+      // puede caer en el mes anterior por el primer día de la semana).
+      const mid = new Date((info.start.getTime() + info.end.getTime()) / 2);
+      currentMonth = `${mid.getFullYear()}-${String(mid.getMonth() + 1).padStart(2, '0')}`;
+    },
     eventClick: (info) => openModal(info.event.extendedProps),
     eventContent: (arg) => {
       const lines = [escapeHtml(arg.event.title)];
@@ -238,5 +247,97 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') closeModal();
 });
 $('retry-button').addEventListener('click', init);
+
+// --- Limpieza del mes (duplicados) ---
+const cleanupKeyInput = $('cleanup-key');
+const cleanupButton = $('cleanup-button');
+const cleanupResult = $('cleanup-result');
+
+cleanupKeyInput.value = localStorage.getItem('deepseekApiKey') || '';
+
+function showCleanupResult(kind, title, lines) {
+  cleanupResult.replaceChildren();
+  cleanupResult.className = kind;
+  const heading = document.createElement('p');
+  heading.textContent = title;
+  cleanupResult.appendChild(heading);
+  if (lines && lines.length > 0) {
+    const list = document.createElement('ul');
+    for (const line of lines) {
+      const item = document.createElement('li');
+      item.textContent = line;
+      list.appendChild(item);
+    }
+    cleanupResult.appendChild(list);
+  }
+}
+
+async function runCleanup() {
+  const key = cleanupKeyInput.value.trim();
+  if (!key) {
+    cleanupKeyInput.focus();
+    showCleanupResult('error', 'Introduce tu API key de DeepSeek para poder limpiar el mes.');
+    return;
+  }
+  localStorage.setItem('deepseekApiKey', key);
+
+  if (!currentMonth) {
+    showCleanupResult('error', 'No se pudo determinar el mes visible del calendario.');
+    return;
+  }
+
+  const [year, month] = currentMonth.split('-').map(Number);
+  const monthName = new Date(year, month - 1, 1).toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
+  if (!confirm(
+    `¿Limpiar ${monthName}? Se enviarán los eventos de ese mes (y los eventos sin fecha) al LLM, ` +
+    'que decidirá cuáles son duplicados y los eliminará conservando uno por evento.')) {
+    return;
+  }
+
+  cleanupButton.disabled = true;
+  cleanupButton.textContent = 'Analizando…';
+  showCleanupResult('ok', 'Analizando con el LLM…');
+  try {
+    const res = await fetch(`/api/events/cleanup?month=${currentMonth}`, {
+      method: 'POST',
+      headers: { 'X-DeepSeek-API-Key': key }
+    });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const err = await res.json();
+        detail = err.detail || err.error || detail;
+      } catch {
+        /* respuesta sin JSON */
+      }
+      showCleanupResult('error', `La limpieza falló: ${detail}`);
+      return;
+    }
+
+    const result = await res.json();
+    const lines = [];
+    if (result.deletedCount === 0) {
+      lines.push('El LLM no encontró duplicados entre los eventos analizados.');
+    }
+    for (const group of result.groups || []) {
+      const removed = group.removed
+        .map((e) => `«${e.title || e.eventUniqueId}» (@${e.account || 'cuenta desconocida'})`)
+        .join(', ');
+      const reason = group.reason ? ` — ${group.reason}` : '';
+      lines.push(`Se conserva «${group.keepTitle || group.keepEventId}»; eliminados: ${removed}${reason}`);
+    }
+    showCleanupResult('ok',
+      `Limpieza de ${monthName}: ${result.eventsAnalyzed} eventos analizados, ` +
+      `${result.deletedCount} duplicados eliminados.`, lines);
+    await init(); // refresca calendario y lista de sin fecha
+  } catch {
+    showCleanupResult('error', 'No se pudo contactar con la API.');
+  } finally {
+    cleanupButton.disabled = false;
+    cleanupButton.textContent = 'Limpiar mes';
+  }
+}
+
+cleanupButton.addEventListener('click', runCleanup);
 
 init();

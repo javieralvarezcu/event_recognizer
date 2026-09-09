@@ -18,6 +18,22 @@
   </div>
 
   <main>
+    <section id="cleanup-section">
+      <h2>Limpieza del mes</h2>
+      <p class="cleanup-help">
+        Envía los eventos del mes mostrado en el calendario (más los eventos sin fecha) al LLM para
+        detectar <strong>duplicados</strong>: el mismo evento anunciado en varios posts. El LLM decide
+        cuáles son el mismo evento comparando cuenta, fecha/recurrencia, resumen y caption — no solo
+        el título. Se eliminan las copias conservando un evento por grupo, y si un evento sin fecha
+        ya está en el calendario, se elimina el que no tiene fecha. Requiere tu API key de DeepSeek.
+      </p>
+      <div class="cleanup-controls">
+        <input id="cleanup-key" type="password" placeholder="API key de DeepSeek" autocomplete="off">
+        <button id="cleanup-button" type="button">Limpiar mes</button>
+      </div>
+      <div id="cleanup-result" class="hidden"></div>
+    </section>
+
     <section id="calendar-section">
       <div id="calendar"></div>
     </section>

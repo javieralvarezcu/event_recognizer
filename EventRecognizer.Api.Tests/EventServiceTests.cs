@@ -11,8 +11,9 @@ public class EventServiceTests
 {
     private static EventService CreateService(
         AppDbContext db,
-        Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze)
-        => new(new FakeDeepSeekService(analyze), db, NullLogger<EventService>.Instance);
+        Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze,
+        Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null)
+        => new(new FakeDeepSeekService(analyze, findDuplicates), db, NullLogger<EventService>.Instance);
 
     [Fact]
     public async Task RecognizeEventsAsync_PersistsOnlyEventPosts_AndReturnsAllPosts()
@@ -332,6 +333,184 @@ public class EventServiceTests
     private static DateRange Range(string? from, string? to)
         => new(from == null ? null : DateTime.Parse(from),
                to == null ? null : DateTime.Parse(to));
+
+    [Fact]
+    public async Task CleanupMonthAsync_WithNoEventsInMonth_ReturnsEmptyAndDoesNotCallLlm()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(TestData.CreateRecord(
+            "EVT-may", "Evento de mayo", postId: "p-may", eventDate: new DateTime(2026, 5, 10)));
+        await fixture.Db.SaveChangesAsync();
+
+        var called = false;
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            findDuplicates: (_, _) => { called = true; return new List<DuplicateGroupResult>(); });
+
+        var response = await service.CleanupMonthAsync(2026, 9, "key");
+
+        Assert.Equal("2026-09", response.Month);
+        Assert.Equal(0, response.EventsAnalyzed);
+        Assert.Equal(0, response.DeletedCount);
+        Assert.Empty(response.Groups);
+        Assert.False(called);
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task CleanupMonthAsync_DeletesOnlyReportedDuplicatesAndKeepsKeeper()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            TestData.CreateRecord("EVT-1", "Fiesta jueves", postId: "p1", eventDate: new DateTime(2026, 9, 5)),
+            TestData.CreateRecord("EVT-2", "Jueves de fiesta", postId: "p2", eventDate: new DateTime(2026, 9, 5)),
+            TestData.CreateRecord("EVT-3", "Concierto", postId: "p3", eventDate: new DateTime(2026, 9, 10)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            findDuplicates: (_, _) => new List<DuplicateGroupResult>
+            {
+                new() { KeepEventId = "EVT-1", DuplicateEventIds = new List<string> { "EVT-2" }, Reason = "Mismo evento" }
+            });
+
+        var response = await service.CleanupMonthAsync(2026, 9, "key");
+
+        Assert.Equal(3, response.EventsAnalyzed);
+        Assert.Equal(1, response.DeletedCount);
+        var group = Assert.Single(response.Groups);
+        Assert.Equal("EVT-1", group.KeepEventId);
+        Assert.Equal("Fiesta jueves", group.KeepTitle);
+        Assert.Equal("Mismo evento", group.Reason);
+        var removed = Assert.Single(group.Removed);
+        Assert.Equal("EVT-2", removed.EventUniqueId);
+        Assert.Equal("Jueves de fiesta", removed.Title);
+        Assert.Equal("test.account", removed.Account);
+
+        var remaining = await fixture.Db.EventRecords.Select(r => r.EventUniqueId).ToListAsync();
+        Assert.Equal(new[] { "EVT-1", "EVT-3" }, remaining.OrderBy(id => id));
+    }
+
+    [Fact]
+    public async Task CleanupMonthAsync_IgnoresUnknownAndOutOfMonthIds()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            TestData.CreateRecord("EVT-1", "Evento del mes", postId: "p1", eventDate: new DateTime(2026, 9, 5)),
+            TestData.CreateRecord("EVT-out", "Evento de mayo", postId: "p-out", eventDate: new DateTime(2026, 5, 10)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            findDuplicates: (_, _) => new List<DuplicateGroupResult>
+            {
+                new()
+                {
+                    KeepEventId = "EVT-1",
+                    DuplicateEventIds = new List<string> { "EVT-out", "EVT-GHOST" },
+                    Reason = "Prueba"
+                }
+            });
+
+        var response = await service.CleanupMonthAsync(2026, 9, "key");
+
+        // EVT-out is outside the analyzed month and EVT-GHOST does not exist:
+        // neither may be deleted.
+        Assert.Equal(1, response.EventsAnalyzed);
+        Assert.Equal(0, response.DeletedCount);
+        Assert.Empty(response.Groups);
+        Assert.Equal(2, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task CleanupMonthAsync_ProtectsIdsListedAsKeep()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            TestData.CreateRecord("EVT-1", "Evento uno", postId: "p1", eventDate: new DateTime(2026, 9, 5)),
+            TestData.CreateRecord("EVT-2", "Evento dos", postId: "p2", eventDate: new DateTime(2026, 9, 6)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            findDuplicates: (_, _) => new List<DuplicateGroupResult>
+            {
+                new() { KeepEventId = "EVT-1", DuplicateEventIds = new List<string> { "EVT-2" } },
+                new() { KeepEventId = "EVT-2", DuplicateEventIds = new List<string> { "EVT-1" } }
+            });
+
+        var response = await service.CleanupMonthAsync(2026, 9, "key");
+
+        // Contradictory groups: both ids are keepers somewhere, so nothing is deleted.
+        Assert.Equal(0, response.DeletedCount);
+        Assert.Equal(2, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task CleanupMonthAsync_SkipsGroupsWhoseKeeperIsUnknown()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            TestData.CreateRecord("EVT-1", "Evento uno", postId: "p1", eventDate: new DateTime(2026, 9, 5)),
+            TestData.CreateRecord("EVT-2", "Evento dos", postId: "p2", eventDate: new DateTime(2026, 9, 6)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            findDuplicates: (_, _) => new List<DuplicateGroupResult>
+            {
+                new()
+                {
+                    KeepEventId = "EVT-GHOST",
+                    DuplicateEventIds = new List<string> { "EVT-1", "EVT-2" }
+                }
+            });
+
+        var response = await service.CleanupMonthAsync(2026, 9, "key");
+
+        // A group whose keeper is not among the analyzed events is discarded entirely,
+        // so a bogus keeper can't cause the whole group to be deleted.
+        Assert.Equal(0, response.DeletedCount);
+        Assert.Equal(2, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task CleanupMonthAsync_CrossesNoDateEventsAgainstMonthEvents()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            // Open-ended weekly event starting in August: occurs in September.
+            TestData.CreateRecord("EVT-weekly", "Noche semanal", postId: "p-weekly",
+                recurrenceStart: new DateTime(2026, 8, 20),
+                recurrenceDaysOfWeek: "4", recurrenceType: "weekly"),
+            // No date at all: shown in the "sin fecha" list and crossed against the month.
+            TestData.CreateRecord("EVT-nodate", "Noche semanal sin fecha", postId: "p-nodate"),
+            // Other month: never analyzed.
+            TestData.CreateRecord("EVT-may", "Evento de mayo", postId: "p-may",
+                eventDate: new DateTime(2026, 5, 10)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            findDuplicates: (events, monthLabel) =>
+            {
+                Assert.Equal("2026-09", monthLabel);
+                // The month event + the no-date event are sent; the May event is not.
+                Assert.Equal(new[] { "EVT-nodate", "EVT-weekly" },
+                    events.Select(e => e.EventUniqueId).OrderBy(id => id));
+                return new List<DuplicateGroupResult>
+                {
+                    new()
+                    {
+                        KeepEventId = "EVT-weekly",
+                        DuplicateEventIds = new List<string> { "EVT-nodate" },
+                        Reason = "El evento sin fecha ya está en el calendario"
+                    }
+                };
+            });
+
+        var response = await service.CleanupMonthAsync(2026, 9, "key");
+
+        Assert.Equal(2, response.EventsAnalyzed);
+        Assert.Equal(1, response.DeletedCount);
+        Assert.Equal("EVT-nodate", Assert.Single(response.Groups).Removed.Single().EventUniqueId);
+        var remaining = await fixture.Db.EventRecords.Select(r => r.EventUniqueId).ToListAsync();
+        Assert.Equal(new[] { "EVT-may", "EVT-weekly" }, remaining.OrderBy(id => id));
+    }
 
     [Fact]
     public async Task RecognizeEventsAsync_WithRange_PassesRangeToDeepSeekService()

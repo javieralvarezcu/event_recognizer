@@ -65,3 +65,41 @@ public class ErrorResponse
     public string Error { get; set; } = string.Empty;
     public string? Detail { get; set; }
 }
+
+/// <summary>
+/// Result of a month cleanup: which duplicate events were detected and removed.
+/// </summary>
+public class CleanupResponse
+{
+    /// <summary>Month cleaned, "yyyy-MM".</summary>
+    public string Month { get; set; } = string.Empty;
+
+    /// <summary>Events sent to the LLM (month events + events without any date).</summary>
+    public int EventsAnalyzed { get; set; }
+
+    /// <summary>Total events actually deleted.</summary>
+    public int DeletedCount { get; set; }
+
+    public List<CleanupGroupDto> Groups { get; set; } = new();
+}
+
+public class CleanupGroupDto
+{
+    public string KeepEventId { get; set; } = string.Empty;
+
+    public string? KeepTitle { get; set; }
+
+    /// <summary>Events actually removed in this group.</summary>
+    public List<CleanupRemovedDto> Removed { get; set; } = new();
+
+    public string? Reason { get; set; }
+}
+
+public class CleanupRemovedDto
+{
+    public string EventUniqueId { get; set; } = string.Empty;
+
+    public string? Title { get; set; }
+
+    public string? Account { get; set; }
+}

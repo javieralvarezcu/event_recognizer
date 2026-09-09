@@ -70,6 +70,7 @@ Los eventos persistidos pueden consultarse posteriormente mediante `GET /api/eve
 Cliente HTTP
     │
     │  POST /api/events/recognize   (header: X-DeepSeek-API-Key)
+    │  POST /api/events/cleanup     (header: X-DeepSeek-API-Key)
     │  GET  /api/events
     │  GET  /api/events/{eventUniqueId}
     │  GET  /                        (panel web estático: calendario)
@@ -350,6 +351,50 @@ Cada elemento tiene la misma forma que la respuesta de `GET /api/events/{eventUn
 
 ---
 
+### `POST /api/events/cleanup?month=yyyy-MM`
+
+Limpia un mes de eventos duplicados. Envía al LLM los eventos que ocurren en el mes indicado **más los eventos sin fecha**, y el modelo decide cuáles describen el mismo evento real (comparando cuenta, fecha/recurrencia, resumen y caption — no solo el título). Se eliminan los duplicados conservando un evento por grupo; si un evento sin fecha coincide con uno con fecha del mes, se elimina el que no tiene fecha.
+
+**Headers requeridos:**
+
+| Header | Descripción |
+|---|---|
+| `X-DeepSeek-API-Key` | Token de API de DeepSeek (proporcionado por el cliente) |
+
+**Query params:**
+
+| Parámetro | Tipo | Descripción |
+|---|---|---|
+| `month` | `string` | Mes a limpiar en formato `yyyy-MM` (requerido) |
+
+**Seguridad:** el servidor solo borra IDs que el LLM marcó como duplicados, que existan en la BD y que estuvieran entre los eventos enviados (los marcados como "conservar" quedan protegidos; los grupos cuyo evento a conservar no exista se descartan enteros).
+
+**Response 200:**
+
+```json
+{
+  "month": "2026-09",
+  "eventsAnalyzed": 12,
+  "deletedCount": 2,
+  "groups": [
+    {
+      "keepEventId": "EVT-20260902-A1B2C3D4",
+      "keepTitle": "Jueves Underground",
+      "removed": [
+        {
+          "eventUniqueId": "EVT-20260905-B2C3D4E5",
+          "title": "Jueves de fiesta",
+          "account": "juevescong"
+        }
+      ],
+      "reason": "Mismo evento semanal en la misma cuenta"
+    }
+  ]
+}
+```
+
+---
+
 ## Esquema de base de datos
 
 ### Tabla `EventRecords`
@@ -510,6 +555,7 @@ Características:
 - Los eventos recurrentes semanales se muestran en **todas** sus ocurrencias; los eventos de varios días ("daily") se muestran como un rango que abarca sus días.
 - Clic en un evento → modal con toda la información: título, resumen, fecha, descripción de fecha, recurrencia humanizada, cuenta, fecha de publicación, enlace al post y su imagen.
 - Los eventos sin ninguna fecha computable se listan aparte en "Eventos sin fecha".
+- Botón **"Limpiar mes"**: envía los eventos del mes visible (más los sin fecha) al LLM para detectar y eliminar duplicados. Requiere la API key de DeepSeek (se guarda en `localStorage` del navegador).
 - Sin autenticación (igual que los endpoints `GET`).
 
 > ⚠️ FullCalendar se carga por CDN (jsdelivr), por lo que el **navegador** del usuario necesita acceso a Internet. La API en sí no depende del CDN.
@@ -650,7 +696,7 @@ Ejemplo: `EVT-20260728-A1B2C3D4E5F6`
 
 La API **no** implementa autenticación de usuarios (JWT, OAuth, etc.). En su lugar:
 
-- El endpoint `POST /api/events/recognize` requiere que el **cliente** proporcione su propia API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
+- Los endpoints `POST /api/events/recognize` y `POST /api/events/cleanup` requieren que el **cliente** proporcione su propia API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
 - Los endpoints `GET /api/events` y `GET /api/events/{eventUniqueId}`, así como el panel web, son públicos.
 
 ### Secretos en el repositorio

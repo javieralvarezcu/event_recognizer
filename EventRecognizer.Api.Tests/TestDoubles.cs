@@ -76,13 +76,23 @@ public sealed class TestableDeepSeekService : DeepSeekService
 public sealed class FakeDeepSeekService : IDeepSeekService
 {
     private readonly Func<List<InstagramPost>, string, List<PostAnalysisResult>> _analyze;
+    private readonly Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? _findDuplicates;
 
-    public FakeDeepSeekService(Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze)
-        => _analyze = analyze;
+    public FakeDeepSeekService(
+        Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze,
+        Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null)
+    {
+        _analyze = analyze;
+        _findDuplicates = findDuplicates;
+    }
 
     public List<string> ReceivedApiKeys { get; } = new();
 
     public DateRange? LastDateRange { get; private set; }
+
+    public List<CleanupEventItem>? LastCleanupEvents { get; private set; }
+
+    public string? LastCleanupMonthLabel { get; private set; }
 
     public Task<List<PostAnalysisResult>> AnalyzePostsAsync(
         List<InstagramPost> posts,
@@ -94,6 +104,20 @@ public sealed class FakeDeepSeekService : IDeepSeekService
         LastDateRange = dateRange;
         return Task.FromResult(_analyze(posts, apiKey));
     }
+
+    public Task<List<DuplicateGroupResult>> FindDuplicateEventsAsync(
+        List<CleanupEventItem> events,
+        string monthLabel,
+        string apiKey,
+        CancellationToken ct = default)
+    {
+        LastCleanupEvents = events;
+        LastCleanupMonthLabel = monthLabel;
+        ReceivedApiKeys.Add(apiKey);
+        return Task.FromResult(_findDuplicates != null
+            ? _findDuplicates(events, monthLabel)
+            : throw new InvalidOperationException("No findDuplicates delegate configured."));
+    }
 }
 
 /// <summary>
@@ -104,15 +128,18 @@ public sealed class FakeEventService : IEventService
     private readonly Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? _recognize;
     private readonly Func<string, CancellationToken, Task<EventDetailResponse?>>? _getByUniqueId;
     private readonly Func<CancellationToken, Task<List<EventDetailResponse>>>? _getAll;
+    private readonly Func<int, int, string, CancellationToken, Task<CleanupResponse>>? _cleanup;
 
     public FakeEventService(
         Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? recognize = null,
         Func<string, CancellationToken, Task<EventDetailResponse?>>? getByUniqueId = null,
-        Func<CancellationToken, Task<List<EventDetailResponse>>>? getAll = null)
+        Func<CancellationToken, Task<List<EventDetailResponse>>>? getAll = null,
+        Func<int, int, string, CancellationToken, Task<CleanupResponse>>? cleanup = null)
     {
         _recognize = recognize;
         _getByUniqueId = getByUniqueId;
         _getAll = getAll;
+        _cleanup = cleanup;
     }
 
     public DateRange? LastDateRange { get; private set; }
@@ -138,6 +165,15 @@ public sealed class FakeEventService : IEventService
         => _getAll != null
             ? _getAll(ct)
             : throw new InvalidOperationException("No getAll delegate configured.");
+
+    public Task<CleanupResponse> CleanupMonthAsync(
+        int year,
+        int month,
+        string deepSeekApiKey,
+        CancellationToken ct = default)
+        => _cleanup != null
+            ? _cleanup(year, month, deepSeekApiKey, ct)
+            : throw new InvalidOperationException("No cleanup delegate configured.");
 }
 
 /// <summary>
@@ -237,4 +273,52 @@ public static class TestData
         };
         return JsonSerializer.Serialize(envelope);
     }
+
+    /// <summary>
+    /// Serializes the DeepSeek envelope whose content holds the duplicate cleanup JSON
+    /// {"duplicate_groups": [...]} that FindDuplicateEventsAsync parses.
+    /// </summary>
+    public static string BuildCleanupDeepSeekResponse(List<DuplicateGroupResult> groups)
+    {
+        var content = JsonSerializer.Serialize(new DuplicateCleanupResult { DuplicateGroups = groups });
+        var envelope = new DeepSeekResponse
+        {
+            Choices = new List<DeepSeekChoice>
+            {
+                new()
+                {
+                    Message = new DeepSeekChoiceMessage { Content = content },
+                    FinishReason = "stop"
+                }
+            }
+        };
+        return JsonSerializer.Serialize(envelope);
+    }
+
+    /// <summary>A persisted event record for service-level tests.</summary>
+    public static EventRecord CreateRecord(
+        string eventUniqueId,
+        string title,
+        string account = "test.account",
+        string postId = "p-1",
+        DateTime? eventDate = null,
+        DateTime? recurrenceStart = null,
+        DateTime? recurrenceEnd = null,
+        string? recurrenceDaysOfWeek = null,
+        string? recurrenceType = null)
+        => new()
+        {
+            EventUniqueId = eventUniqueId,
+            Title = title,
+            Summary = $"Resumen de {title}",
+            Account = account,
+            PostId = postId,
+            EventDate = eventDate,
+            RecurrenceStartDate = recurrenceStart,
+            RecurrenceEndDate = recurrenceEnd,
+            RecurrenceDaysOfWeek = recurrenceDaysOfWeek,
+            RecurrenceType = recurrenceType,
+            IsRecurrent = recurrenceType != null,
+            CreatedAt = DateTime.UtcNow
+        };
 }
