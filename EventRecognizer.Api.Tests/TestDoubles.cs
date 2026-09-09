@@ -97,19 +97,22 @@ public sealed class FakeDeepSeekService : IDeepSeekService
 }
 
 /// <summary>
-/// IEventService fake driven by delegates for the two endpoints.
+/// IEventService fake driven by delegates for the three endpoints.
 /// </summary>
 public sealed class FakeEventService : IEventService
 {
     private readonly Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? _recognize;
     private readonly Func<string, CancellationToken, Task<EventDetailResponse?>>? _getByUniqueId;
+    private readonly Func<CancellationToken, Task<List<EventDetailResponse>>>? _getAll;
 
     public FakeEventService(
         Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? recognize = null,
-        Func<string, CancellationToken, Task<EventDetailResponse?>>? getByUniqueId = null)
+        Func<string, CancellationToken, Task<EventDetailResponse?>>? getByUniqueId = null,
+        Func<CancellationToken, Task<List<EventDetailResponse>>>? getAll = null)
     {
         _recognize = recognize;
         _getByUniqueId = getByUniqueId;
+        _getAll = getAll;
     }
 
     public DateRange? LastDateRange { get; private set; }
@@ -130,6 +133,11 @@ public sealed class FakeEventService : IEventService
         => _getByUniqueId != null
             ? _getByUniqueId(eventUniqueId, ct)
             : throw new InvalidOperationException("No getByUniqueId delegate configured.");
+
+    public Task<List<EventDetailResponse>> GetAllEventsAsync(CancellationToken ct = default)
+        => _getAll != null
+            ? _getAll(ct)
+            : throw new InvalidOperationException("No getAll delegate configured.");
 }
 
 /// <summary>

@@ -200,4 +200,33 @@ public class EventsControllerTests
         var ok = Assert.IsType<OkObjectResult>(result);
         Assert.Same(detail, ok.Value);
     }
+
+    [Fact]
+    public async Task GetAll_ReturnsOkWithEventsFromService()
+    {
+        var events = new List<EventDetailResponse>
+        {
+            new() { EventUniqueId = "EVT-1", Title = "Evento uno" }
+        };
+        var service = new FakeEventService(getAll: _ => Task.FromResult(events));
+        var controller = CreateController(service);
+
+        var result = await controller.GetAll(CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Same(events, ok.Value);
+    }
+
+    [Fact]
+    public async Task GetAll_WhenServiceReturnsEmptyList_ReturnsOkWithEmptyArray()
+    {
+        var service = new FakeEventService(getAll: _ => Task.FromResult(new List<EventDetailResponse>()));
+        var controller = CreateController(service);
+
+        var result = await controller.GetAll(CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var events = Assert.IsType<List<EventDetailResponse>>(ok.Value);
+        Assert.Empty(events);
+    }
 }

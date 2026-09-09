@@ -152,6 +152,18 @@ public class EventService : IEventService
         return MapToDetailDto(record);
     }
 
+    public async Task<List<EventDetailResponse>> GetAllEventsAsync(CancellationToken ct = default)
+    {
+        var records = await _dbContext.EventRecords
+            .AsNoTracking()
+            .OrderBy(e => (e.EventDate ?? e.RecurrenceStartDate) == null)
+            .ThenBy(e => e.EventDate ?? e.RecurrenceStartDate)
+            .ThenBy(e => e.CreatedAt)
+            .ToListAsync(ct);
+
+        return records.Select(MapToDetailDto).ToList();
+    }
+
     private static string GenerateEventUniqueId(InstagramPost post, PostAnalysisResult analysis)
     {
         var raw = $"{post.PostId}-{post.Account}-{analysis.Title}";

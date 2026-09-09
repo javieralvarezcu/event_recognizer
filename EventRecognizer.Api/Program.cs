@@ -74,6 +74,10 @@ using (var scope = app.Services.CreateScope())
 app.UseSwagger();
 app.UseSwaggerUI();
 
+// --- Static panel (calendar UI) at the app root ---
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 app.MapControllers();
 
 app.Run();

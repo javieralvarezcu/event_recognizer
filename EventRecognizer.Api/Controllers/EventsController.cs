@@ -128,4 +128,16 @@ public class EventsController : ControllerBase
 
         return Ok(result);
     }
+
+    /// <summary>
+    /// Retrieves all persisted events, ordered by effective date (oldest first, events
+    /// without a computable date last).
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(List<EventDetailResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetAll(CancellationToken ct)
+    {
+        var events = await _eventService.GetAllEventsAsync(ct);
+        return Ok(events);
+    }
 }

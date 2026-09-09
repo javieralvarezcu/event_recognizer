@@ -27,4 +27,10 @@ public interface IEventService
     /// Retrieves an event by its unique event identifier.
     /// </summary>
     Task<EventDetailResponse?> GetEventByUniqueIdAsync(string eventUniqueId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Retrieves all persisted events ordered by effective date (event date or recurrence
+    /// start), then creation time. Events without any computable date come last.
+    /// </summary>
+    Task<List<EventDetailResponse>> GetAllEventsAsync(CancellationToken ct = default);
 }

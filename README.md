@@ -9,6 +9,7 @@ API para reconocer automáticamente carteles de eventos en publicaciones de Inst
 - [Arquitectura](#arquitectura)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Endpoints de la API](#endpoints-de-la-api)
+- [Panel web (calendario)](#panel-web-calendario)
 - [Esquema de base de datos](#esquema-de-base-de-datos)
 - [Requisitos](#requisitos)
 - [Configuración local (desarrollo)](#configuración-local-desarrollo)
@@ -34,7 +35,7 @@ El flujo de reconocimiento:
 5. Los eventos válidos se persisten en SQL Server (con deduplicación por `PostId`).
 6. Se devuelven **todos** los posts al cliente — tanto los clasificados como evento como los que no — con la información estructurada correspondiente.
 
-Los eventos persistidos pueden consultarse posteriormente mediante `GET /api/events/{eventUniqueId}`.
+Los eventos persistidos pueden consultarse posteriormente mediante `GET /api/events/{eventUniqueId}` y listarse con `GET /api/events`. La propia API sirve además un panel web con vista de calendario en la raíz (`/`).
 
 ---
 
@@ -69,7 +70,9 @@ Los eventos persistidos pueden consultarse posteriormente mediante `GET /api/eve
 Cliente HTTP
     │
     │  POST /api/events/recognize   (header: X-DeepSeek-API-Key)
+    │  GET  /api/events
     │  GET  /api/events/{eventUniqueId}
+    │  GET  /                        (panel web estático: calendario)
     ▼
 EventsController
     │
@@ -111,6 +114,10 @@ event_recognizer/
     │   └── AppDbContextFactory.cs        # Factory para CLI de migraciones
     ├── Dtos/
     │   └── RecognitionResponses.cs       # DTOs de respuesta de la API
+    ├── wwwroot/                          # Panel web (calendario), servido en la raíz
+    │   ├── index.html
+    │   ├── app.js
+    │   └── styles.css
     ├── Migrations/
     │   └── 20260902013644_InitialCreate.cs
     ├── Models/
@@ -307,6 +314,42 @@ Recupera un evento previamente reconocido por su identificador único.
 
 ---
 
+### `GET /api/events`
+
+Lista todos los eventos persistidos. Sin paginación ni autenticación (igual que el resto de lecturas).
+
+**Orden:** fecha efectiva ascendente (la fecha del evento o, si no tiene, el inicio de su recurrencia), y después `CreatedAt`. Los eventos sin ninguna fecha computable van al final.
+
+**Response 200:**
+
+```json
+[
+  {
+    "eventUniqueId": "EVT-20260728-A1B2C3D4",
+    "title": "Fiesta de Verano",
+    "eventDate": "2026-09-19T22:00:00",
+    "eventDateDescription": "Sábado 19 de septiembre a las 22:00",
+    "summary": "Fiesta de verano en la playa...",
+    "isRecurrent": false,
+    "recurrenceType": null,
+    "recurrenceDaysOfWeek": null,
+    "recurrenceStartDate": null,
+    "recurrenceEndDate": null,
+    "account": "lacasadelaplaya",
+    "postId": "ABC123xyz",
+    "caption": "Este sábado 19 de septiembre...",
+    "postDatetime": "2026-07-28T14:30:00",
+    "url": "https://www.instagram.com/p/ABC123xyz/",
+    "imageUrl": "https://...",
+    "createdAt": "2026-07-28T15:00:00Z"
+  }
+]
+```
+
+Cada elemento tiene la misma forma que la respuesta de `GET /api/events/{eventUniqueId}`.
+
+---
+
 ## Esquema de base de datos
 
 ### Tabla `EventRecords`
@@ -454,6 +497,27 @@ docker compose down -v
 
 ---
 
+## Panel web (calendario)
+
+La API sirve un panel web estático en la raíz, sin login:
+
+- **Desarrollo:** `http://localhost:5214/`
+- **Docker:** `http://localhost:8081/` (en producción, a través del túnel de Cloudflare)
+
+Características:
+
+- Vista de calendario mensual en español (FullCalendar 6), con navegación y vista de lista.
+- Los eventos recurrentes semanales se muestran en **todas** sus ocurrencias; los eventos de varios días ("daily") se muestran como un rango que abarca sus días.
+- Clic en un evento → modal con toda la información: título, resumen, fecha, descripción de fecha, recurrencia humanizada, cuenta, fecha de publicación, enlace al post y su imagen.
+- Los eventos sin ninguna fecha computable se listan aparte en "Eventos sin fecha".
+- Sin autenticación (igual que los endpoints `GET`).
+
+> ⚠️ FullCalendar se carga por CDN (jsdelivr), por lo que el **navegador** del usuario necesita acceso a Internet. La API en sí no depende del CDN.
+
+Swagger UI sigue disponible en `/swagger`.
+
+---
+
 ## Despliegue en producción
 
 El proyecto incluye un override de Docker Compose para producción que añade un túnel de Cloudflare para exponer la API de forma segura sin abrir puertos en el firewall.
@@ -587,7 +651,7 @@ Ejemplo: `EVT-20260728-A1B2C3D4E5F6`
 La API **no** implementa autenticación de usuarios (JWT, OAuth, etc.). En su lugar:
 
 - El endpoint `POST /api/events/recognize` requiere que el **cliente** proporcione su propia API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
-- El endpoint `GET /api/events/{eventUniqueId}` es público.
+- Los endpoints `GET /api/events` y `GET /api/events/{eventUniqueId}`, así como el panel web, son públicos.
 
 ### Secretos en el repositorio
 

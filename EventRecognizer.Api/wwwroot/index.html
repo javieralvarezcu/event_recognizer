@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calendario de eventos</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <h1>Calendario de eventos</h1>
+    <p class="subtitle">Haz clic en un evento para ver todos los detalles.</p>
+  </header>
+
+  <div id="error-banner" class="hidden" role="alert">
+    <p id="error-message">No se pudieron cargar los eventos.</p>
+    <button id="retry-button" type="button">Reintentar</button>
+  </div>
+
+  <main>
+    <section id="calendar-section">
+      <div id="calendar"></div>
+    </section>
+
+    <section id="no-date-section">
+      <h2>Eventos sin fecha</h2>
+      <p id="no-date-empty" class="hidden">No hay eventos sin fecha.</p>
+      <ul id="no-date-list"></ul>
+    </section>
+  </main>
+
+  <!-- Modal de detalle -->
+  <div id="modal-overlay" class="hidden">
+    <div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <button id="modal-close" type="button" aria-label="Cerrar">&times;</button>
+      <h2 id="modal-title"></h2>
+      <img id="modal-image" class="hidden" alt="Imagen del evento" loading="lazy" referrerpolicy="no-referrer">
+      <p id="modal-image-fallback" class="hidden">Imagen no disponible (el enlace puede haber caducado).</p>
+      <dl>
+        <dt>Resumen</dt>
+        <dd id="modal-summary"></dd>
+        <dt>Fecha</dt>
+        <dd id="modal-date"></dd>
+        <dt>Recurrencia</dt>
+        <dd id="modal-recurrence"></dd>
+        <dt>Descripción de la fecha</dt>
+        <dd id="modal-date-description"></dd>
+        <dt>Cuenta</dt>
+        <dd id="modal-account"></dd>
+        <dt>Publicado</dt>
+        <dd id="modal-post-datetime"></dd>
+        <dt>Enlace</dt>
+        <dd><a id="modal-url" target="_blank" rel="noopener">Ver publicación en Instagram</a></dd>
+      </dl>
+      <h3>Texto del post</h3>
+      <p id="modal-caption" class="caption"></p>
+    </div>
+  </div>
+
+  <!-- FullCalendar v6 (CDN, requiere acceso a Internet) -->
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@fullcalendar/core@6.1.15/locales/es.global.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

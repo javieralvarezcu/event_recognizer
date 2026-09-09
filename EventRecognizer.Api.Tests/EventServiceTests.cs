@@ -208,6 +208,127 @@ public class EventServiceTests
         Assert.Null(result);
     }
 
+    [Fact]
+    public async Task GetAllEventsAsync_WithNoEvents_ReturnsEmptyList()
+    {
+        using var fixture = new TestDatabase();
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var result = await service.GetAllEventsAsync();
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public async Task GetAllEventsAsync_ReturnsAllEventsWithFullDetails()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            new EventRecord
+            {
+                EventUniqueId = "EVT-1",
+                Title = "Evento simple",
+                EventDate = new DateTime(2026, 9, 19, 20, 0, 0, DateTimeKind.Utc),
+                EventDateDescription = "Sábado 19",
+                Summary = "Resumen simple",
+                Account = "test.account",
+                PostId = "p1",
+                Caption = "cartel",
+                Url = "https://instagram.com/p/p1",
+                ImageUrl = "https://cdn.example.com/p1.jpg",
+                CreatedAt = new DateTime(2026, 9, 1, 10, 0, 0, DateTimeKind.Utc)
+            },
+            new EventRecord
+            {
+                EventUniqueId = "EVT-2",
+                Title = "Evento semanal",
+                Summary = "Resumen semanal",
+                Account = "test.account",
+                PostId = "p2",
+                IsRecurrent = true,
+                RecurrenceType = "weekly",
+                RecurrenceDaysOfWeek = "1,2,3,4",
+                RecurrenceStartDate = new DateTime(2026, 9, 10, 0, 0, 0, DateTimeKind.Utc),
+                CreatedAt = new DateTime(2026, 9, 1, 11, 0, 0, DateTimeKind.Utc)
+            });
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var result = await service.GetAllEventsAsync();
+
+        Assert.Equal(2, result.Count);
+
+        var simple = result.Single(e => e.EventUniqueId == "EVT-1");
+        Assert.Equal("Evento simple", simple.Title);
+        Assert.Equal("Sábado 19", simple.EventDateDescription);
+        Assert.Equal("Resumen simple", simple.Summary);
+        Assert.Equal("p1", simple.PostId);
+        Assert.Equal("cartel", simple.Caption);
+        Assert.Equal("https://instagram.com/p/p1", simple.Url);
+        Assert.Equal("https://cdn.example.com/p1.jpg", simple.ImageUrl);
+
+        var weekly = result.Single(e => e.EventUniqueId == "EVT-2");
+        Assert.True(weekly.IsRecurrent);
+        Assert.Equal("weekly", weekly.RecurrenceType);
+        Assert.Equal("1,2,3,4", weekly.RecurrenceDaysOfWeek);
+        Assert.NotNull(weekly.RecurrenceStartDate);
+    }
+
+    [Fact]
+    public async Task GetAllEventsAsync_OrdersByEffectiveDateThenCreatedAt()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            new EventRecord
+            {
+                EventUniqueId = "EVT-date-sep10",
+                Title = "Con fecha",
+                EventDate = new DateTime(2026, 9, 10, 0, 0, 0, DateTimeKind.Utc),
+                Account = "test.account",
+                PostId = "p1",
+                CreatedAt = new DateTime(2026, 9, 1, 10, 0, 0, DateTimeKind.Utc)
+            },
+            new EventRecord
+            {
+                // No EventDate, but recurrence start earlier: must sort first (coalesce).
+                EventUniqueId = "EVT-recur-sep05",
+                Title = "Solo inicio recurrencia",
+                Account = "test.account",
+                PostId = "p2",
+                RecurrenceStartDate = new DateTime(2026, 9, 5, 0, 0, 0, DateTimeKind.Utc),
+                CreatedAt = new DateTime(2026, 9, 1, 11, 0, 0, DateTimeKind.Utc)
+            },
+            new EventRecord
+            {
+                // Same date as the first, later CreatedAt: sorts after it.
+                EventUniqueId = "EVT-date-sep10-late",
+                Title = "Con fecha (creado después)",
+                EventDate = new DateTime(2026, 9, 10, 0, 0, 0, DateTimeKind.Utc),
+                Account = "test.account",
+                PostId = "p3",
+                CreatedAt = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc)
+            },
+            new EventRecord
+            {
+                // No computable date at all: sorts last.
+                EventUniqueId = "EVT-no-date",
+                Title = "Sin fecha",
+                Account = "test.account",
+                PostId = "p4",
+                CreatedAt = new DateTime(2026, 9, 1, 9, 0, 0, DateTimeKind.Utc)
+            });
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var result = await service.GetAllEventsAsync();
+
+        Assert.Equal(
+            new[] { "EVT-recur-sep05", "EVT-date-sep10", "EVT-date-sep10-late", "EVT-no-date" },
+            result.Select(e => e.EventUniqueId).ToArray());
+    }
+
     private static DateRange Range(string? from, string? to)
         => new(from == null ? null : DateTime.Parse(from),
                to == null ? null : DateTime.Parse(to));
