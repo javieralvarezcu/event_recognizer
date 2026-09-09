@@ -342,7 +342,7 @@ public class DeepSeekService : IDeepSeekService
         return sb.ToString();
     }
 
-    private static string TruncateForPrompt(string text, int maxChars)
+    private static string TruncateForPrompt(string? text, int maxChars)
     {
         if (string.IsNullOrEmpty(text)) return "(vacío)";
         return text.Length <= maxChars ? text : text[..maxChars] + "...";

@@ -13,8 +13,13 @@ public class InstagramPost
     [JsonPropertyName("post_id")]
     public string PostId { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Nullable: Instagram posts without a caption are common (e.g. reels).
+    /// Making it nullable also prevents the implicit [Required] that ASP.NET Core
+    /// applies to non-nullable reference types from rejecting such posts.
+    /// </summary>
     [JsonPropertyName("caption")]
-    public string Caption { get; set; } = string.Empty;
+    public string? Caption { get; set; }
 
     [JsonPropertyName("datetime")]
     public DateTime? Datetime { get; set; }

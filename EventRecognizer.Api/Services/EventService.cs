@@ -200,7 +200,7 @@ public class EventService : IEventService
                     IsEvent = false,
                     Account = post.Account,
                     PostId = post.PostId,
-                    Caption = post.Caption,
+                    Caption = post.Caption ?? string.Empty,
                     PostDatetime = post.Datetime,
                     Url = post.Url,
                     ImageUrl = post.ImageUrl,
