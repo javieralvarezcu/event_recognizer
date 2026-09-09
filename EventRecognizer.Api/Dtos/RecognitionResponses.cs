@@ -58,6 +58,52 @@ public class EventDetailResponse
     public string Url { get; set; } = string.Empty;
     public string? ImageUrl { get; set; }
     public DateTime CreatedAt { get; set; }
+
+    // --- Cross-match with muxojaleo.com (populated when the event is matched) ---
+
+    /// <summary>Whether the LLM matched this event with one of muxojaleo.com.</summary>
+    public bool IsCrossed { get; set; }
+
+    public string? MuxoTitle { get; set; }
+
+    public string? MuxoLink { get; set; }
+
+    public DateTime? MuxoDate { get; set; }
+}
+
+/// <summary>
+/// Result of a crosscheck run against the muxojaleo.com calendar.
+/// </summary>
+public class CrossCheckResponse
+{
+    /// <summary>Events scraped from muxojaleo.com (deduplicated by external id).</summary>
+    public int MuxoEventsScraped { get; set; }
+
+    /// <summary>Muxo events persisted for the first time in this run.</summary>
+    public int MuxoEventsNew { get; set; }
+
+    /// <summary>Our events sent to the LLM.</summary>
+    public int OurEventsAnalyzed { get; set; }
+
+    /// <summary>New matches persisted in this run.</summary>
+    public int MatchesFound { get; set; }
+
+    public List<CrossMatchDto> Matches { get; set; } = new();
+}
+
+public class CrossMatchDto
+{
+    public string EventUniqueId { get; set; } = string.Empty;
+
+    public string? EventTitle { get; set; }
+
+    public string? MuxoTitle { get; set; }
+
+    public DateTime? MuxoDate { get; set; }
+
+    public string? MuxoLink { get; set; }
+
+    public string? Reason { get; set; }
 }
 
 public class ErrorResponse

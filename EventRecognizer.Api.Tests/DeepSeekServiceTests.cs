@@ -384,4 +384,67 @@ public class DeepSeekServiceTests
         Assert.Contains("SIN FECHA", systemPrompt);
         Assert.Contains("NO te fíes solo del título", systemPrompt);
     }
+
+    private static List<MuxoEventItem> CreateMuxoItems()
+        => new()
+        {
+            new MuxoEventItem
+            {
+                ExternalId = "11",
+                Title = "Jam de poesía",
+                Date = new DateTime(2026, 9, 9),
+                Venue = "Círculo Juan 23",
+                Categories = "Jam, Poesía",
+                Link = "https://www.instagram.com/p/X/"
+            }
+        };
+
+    [Fact]
+    public async Task FindCrossMatchesAsync_WithEmptyList_ReturnsEmptyWithoutCallingApi()
+    {
+        var matches = await _service.FindCrossMatchesAsync(new List<CleanupEventItem>(), CreateMuxoItems(), "key");
+
+        Assert.Empty(matches);
+        Assert.Empty(_handler.Requests);
+    }
+
+    [Fact]
+    public async Task FindCrossMatchesAsync_WithValidResponse_ReturnsParsedMatches()
+    {
+        var matches = new List<CrossMatchResult>
+        {
+            new() { EventUniqueId = "EVT-1", MuxoEventId = "11", Reason = "Mismo evento" }
+        };
+        _handler.Enqueue(HttpStatusCode.OK, TestData.BuildCrossMatchDeepSeekResponse(matches));
+
+        var result = await _service.FindCrossMatchesAsync(CreateCleanupEvents(), CreateMuxoItems(), "test-api-key");
+
+        var match = Assert.Single(result);
+        Assert.Equal("EVT-1", match.EventUniqueId);
+        Assert.Equal("11", match.MuxoEventId);
+        Assert.Equal("Mismo evento", match.Reason);
+
+        var request = Assert.Single(_handler.Requests);
+        Assert.Equal("Bearer test-api-key", request.Headers.Authorization!.ToString());
+    }
+
+    [Fact]
+    public async Task FindCrossMatchesAsync_PromptIncludesBothLists()
+    {
+        _handler.Enqueue(HttpStatusCode.OK, TestData.BuildCrossMatchDeepSeekResponse(new List<CrossMatchResult>()));
+
+        await _service.FindCrossMatchesAsync(CreateCleanupEvents(), CreateMuxoItems(), "key");
+
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(Assert.Single(_handler.RequestBodies)!)!;
+        var userPrompt = payload.Messages[1].Content;
+        Assert.Contains("NUESTROS EVENTOS", userPrompt);
+        Assert.Contains("EVENTOS DE MUXOJALEO", userPrompt);
+        Assert.Contains("EVT-1", userPrompt);
+        Assert.Contains("11", userPrompt);
+        Assert.Contains("Círculo Juan 23", userPrompt);
+
+        var systemPrompt = payload.Messages[0].Content;
+        Assert.Contains("matches", systemPrompt);
+        Assert.Contains("coincidencia SEGURA", systemPrompt);
+    }
 }

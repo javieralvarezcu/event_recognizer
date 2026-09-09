@@ -51,8 +51,8 @@ main {
   padding: 0.75rem;
 }
 
-/* Limpieza del mes */
-#cleanup-section {
+/* Acciones (limpieza del mes + cruce con muxojaleo) */
+#actions-section {
   background: #fff;
   border: 1px solid var(--fc-border-color);
   border-radius: 8px;
@@ -60,12 +60,23 @@ main {
   margin-bottom: 1.25rem;
 }
 
-#cleanup-section h2 {
+#actions-section h2 {
   margin: 0 0 0.5rem;
   font-size: 1.2rem;
 }
 
-.cleanup-help {
+.action-block {
+  border-top: 1px solid var(--fc-border-color);
+  padding-top: 0.9rem;
+  margin-top: 0.9rem;
+}
+
+.action-block h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.02rem;
+}
+
+.action-help {
   color: #5b6472;
   font-size: 0.92rem;
   margin: 0 0 0.75rem;
@@ -85,7 +96,7 @@ main {
   font-size: 0.95rem;
 }
 
-#cleanup-button {
+.action-block button {
   background: var(--fc-button-bg-color);
   color: #fff;
   border: none;
@@ -95,45 +106,95 @@ main {
   cursor: pointer;
 }
 
-#cleanup-button:hover:not(:disabled) {
+.action-block button:hover:not(:disabled) {
   background: var(--fc-button-hover-bg-color);
 }
 
-#cleanup-button:disabled {
+.action-block button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
-#cleanup-button.confirm {
+.action-block button.confirm {
   background: #d95c29;
 }
 
-#cleanup-result {
+.action-result {
   margin-top: 0.75rem;
   padding: 0.75rem 1rem;
   border-radius: 8px;
   font-size: 0.95rem;
 }
 
-#cleanup-result.ok {
+.action-result.ok {
   background: #e8f5ec;
   border: 1px solid #2e7d4f;
   color: #1d4d30;
 }
 
-#cleanup-result.error {
+.action-result.error {
   background: #fdecea;
   border: 1px solid #b3261e;
   color: #7c1d17;
 }
 
-#cleanup-result ul {
+.action-result ul {
   margin: 0.4rem 0 0;
   padding-left: 1.2rem;
 }
 
-#cleanup-result li {
+.action-result li {
   margin: 0.15rem 0;
+}
+
+/* Barra del calendario: filtro de cruzados */
+.calendar-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background: #fff;
+  border: 1px solid var(--fc-border-color);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  padding: 0.6rem 0.9rem;
+}
+
+.calendar-toolbar .toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+.calendar-toolbar .legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: #5b6472;
+}
+
+.legend-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.legend-dot.crossed {
+  background: #2e7d4f;
+}
+
+#calendar {
+  border-radius: 0 0 8px 8px;
+}
+
+.muxo-match {
+  color: #2e7d4f;
+  font-weight: 600;
 }
 
 #calendar .fc-event {

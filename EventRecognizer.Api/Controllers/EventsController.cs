@@ -202,6 +202,68 @@ public class EventsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Scrapes the muxojaleo.com calendar (persisting new events) and cross-matches our
+    /// persisted events against it via the LLM, storing the new matches so the panel
+    /// can show which events are already registered there.
+    /// </summary>
+    /// <remarks>Requires the header <c>X-DeepSeek-API-Key</c> with a valid DeepSeek API token.</remarks>
+    [HttpPost("crosscheck")]
+    [ProducesResponseType(typeof(CrossCheckResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> CrossCheck(CancellationToken ct)
+    {
+        var deepSeekApiKey = Request.Headers[DeepSeekApiKeyHeader].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(deepSeekApiKey))
+        {
+            return MissingApiKey();
+        }
+
+        try
+        {
+            var result = await _eventService.CrossCheckAsync(deepSeekApiKey, ct);
+            return Ok(result);
+        }
+        catch (ScrapeException ex)
+        {
+            _logger.LogError(ex, "Failed to scrape the muxojaleo calendar");
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponse
+            {
+                Error = "Failed to scrape the muxojaleo calendar",
+                Detail = ex.Message
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogError(ex, "LLM response parsing error during crosscheck");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to process the LLM response",
+                Detail = ex.Message
+            });
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "DeepSeek API call failed during crosscheck");
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponse
+            {
+                Error = "Failed to communicate with the LLM service",
+                Detail = ex.Message
+            });
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Failed to save crosscheck results to the database");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to save events to the database",
+                Detail = ex.Message
+            });
+        }
+    }
+
     private UnauthorizedObjectResult MissingApiKey()
         => Unauthorized(new ErrorResponse
         {

@@ -318,4 +318,79 @@ public class EventsControllerTests
         var error = Assert.IsType<ErrorResponse>(objectResult.Value);
         Assert.Equal("Failed to process the LLM response", error.Error);
     }
+
+    [Fact]
+    public async Task CrossCheck_WithMissingApiKey_Returns401()
+    {
+        var controller = CreateController(new FakeEventService());
+
+        var result = await controller.CrossCheck(CancellationToken.None);
+
+        var unauthorized = Assert.IsType<UnauthorizedObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(unauthorized.Value);
+        Assert.Equal("Missing API key", error.Error);
+    }
+
+    [Fact]
+    public async Task CrossCheck_WithKey_ReturnsOkAndPassesKey()
+    {
+        string? receivedKey = null;
+        var response = new CrossCheckResponse { MuxoEventsScraped = 3, MuxoEventsNew = 3, MatchesFound = 1 };
+        var service = new FakeEventService(crossCheck: (key, _) =>
+        {
+            receivedKey = key;
+            return Task.FromResult(response);
+        });
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "secret-key" });
+
+        var result = await controller.CrossCheck(CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Same(response, ok.Value);
+        Assert.Equal("secret-key", receivedKey);
+    }
+
+    [Fact]
+    public async Task CrossCheck_WhenServiceThrowsScrapeException_Returns502WithScrapeError()
+    {
+        var service = new FakeEventService(crossCheck: (_, _) =>
+            throw new ScrapeException("no se pudo parsear"));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.CrossCheck(CancellationToken.None);
+
+        var objectResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, objectResult.StatusCode);
+        var error = Assert.IsType<ErrorResponse>(objectResult.Value);
+        Assert.Equal("Failed to scrape the muxojaleo calendar", error.Error);
+        Assert.Equal("no se pudo parsear", error.Detail);
+    }
+
+    [Fact]
+    public async Task CrossCheck_WhenServiceThrowsHttpRequestException_Returns502()
+    {
+        var service = new FakeEventService(crossCheck: (_, _) => throw new HttpRequestException("boom"));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.CrossCheck(CancellationToken.None);
+
+        var objectResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, objectResult.StatusCode);
+        var error = Assert.IsType<ErrorResponse>(objectResult.Value);
+        Assert.Equal("Failed to communicate with the LLM service", error.Error);
+    }
+
+    [Fact]
+    public async Task CrossCheck_WhenServiceThrowsInvalidOperationException_Returns500()
+    {
+        var service = new FakeEventService(crossCheck: (_, _) => throw new InvalidOperationException("malformed"));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.CrossCheck(CancellationToken.None);
+
+        var objectResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status500InternalServerError, objectResult.StatusCode);
+        var error = Assert.IsType<ErrorResponse>(objectResult.Value);
+        Assert.Equal("Failed to process the LLM response", error.Error);
+    }
 }

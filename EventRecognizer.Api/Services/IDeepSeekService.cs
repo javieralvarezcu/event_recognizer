@@ -34,4 +34,18 @@ public interface IDeepSeekService
         string monthLabel,
         string apiKey,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Asks the LLM to cross-match our persisted events with the events of the
+    /// muxojaleo.com calendar, returning the pairs that describe the same real event.
+    /// </summary>
+    /// <param name="ourEvents">Our persisted events. Only these ids may be referenced.</param>
+    /// <param name="muxoEvents">Events scraped from muxojaleo.com. Only these ids may be referenced.</param>
+    /// <param name="apiKey">The DeepSeek API key provided by the client in the request header.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<List<CrossMatchResult>> FindCrossMatchesAsync(
+        List<CleanupEventItem> ourEvents,
+        List<MuxoEventItem> muxoEvents,
+        string apiKey,
+        CancellationToken ct = default);
 }

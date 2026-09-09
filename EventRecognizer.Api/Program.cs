@@ -20,8 +20,18 @@ builder.Services.AddHttpClient("DeepSeek", client =>
     client.Timeout = TimeSpan.FromSeconds(120);
 });
 
+// --- HTTP Client for scraping the muxojaleo.com calendar ---
+builder.Services.AddHttpClient("MuxoJaleo", client =>
+{
+    client.BaseAddress = new Uri("https://muxojaleo.com");
+    client.Timeout = TimeSpan.FromSeconds(30);
+    client.DefaultRequestHeaders.UserAgent.ParseAdd(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36");
+});
+
 // --- App Services ---
 builder.Services.AddScoped<IDeepSeekService, DeepSeekService>();
+builder.Services.AddScoped<IMuxoScraperService, MuxoScraperService>();
 builder.Services.AddScoped<IEventService, EventService>();
 
 // --- Controllers & Swagger ---

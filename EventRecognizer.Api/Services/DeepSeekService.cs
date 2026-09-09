@@ -115,6 +115,110 @@ public class DeepSeekService : IDeepSeekService
         }
     }
 
+    public async Task<List<CrossMatchResult>> FindCrossMatchesAsync(
+        List<CleanupEventItem> ourEvents,
+        List<MuxoEventItem> muxoEvents,
+        string apiKey,
+        CancellationToken ct = default)
+    {
+        if (ourEvents.Count == 0 || muxoEvents.Count == 0)
+            return new List<CrossMatchResult>();
+
+        var matches = await SendChatWithRetriesAsync(
+            BuildCrossMatchSystemPrompt(), BuildCrossMatchUserPrompt(ourEvents, muxoEvents), apiKey, maxTokens: 8192,
+            ParseCrossMatches, ct);
+        if (matches == null)
+            throw new InvalidOperationException(
+                $"The LLM failed to return a valid response for the cross-match after {MaxAttempts} attempts.");
+
+        return matches;
+    }
+
+    private List<CrossMatchResult> ParseCrossMatches(string content)
+    {
+        try
+        {
+            var result = JsonSerializer.Deserialize<CrossMatchBatchResult>(content);
+            return result?.Matches ?? new List<CrossMatchResult>();
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize cross-match response: {Content}",
+                content[..Math.Min(500, content.Length)]);
+            throw new InvalidOperationException("The LLM returned an unexpected response format.", ex);
+        }
+    }
+
+    private static string BuildCrossMatchSystemPrompt()
+    {
+        return """
+            Eres un asistente que cruza dos listas de eventos culturales de Córdoba para determinar cuáles se refieren al MISMO evento real.
+
+            Recibirás:
+            1. NUESTROS EVENTOS: eventos detectados en posts de Instagram por un sistema de reconocimiento.
+            2. EVENTOS DE MUXOJALEO: eventos publicados en el calendario de muxojaleo.com.
+
+            Tu tarea: devolver los pares (evento nuestro, evento de muxojaleo) que describen el mismo evento real.
+
+            REGLAS DE COMPARACIÓN (MUY IMPORTANTE):
+            - NO te fíes solo del título: los títulos pueden variar entre ambas fuentes. Compara título, fecha (o patrón de recurrencia), lugar/espacio, cuenta y enlaces.
+            - Si el enlace de Instagram de NUESTRO evento coincide con el enlace del evento de muxojaleo, es una coincidencia SEGURA: empareja.
+            - Las fechas deben ser compatibles: mismo día, o el mismo patrón semanal en el mismo lugar.
+            - El mismo lugar/espacio (misma cuenta, misma sala) + título parecido + fecha compatible = mismo evento.
+            - Solo empareja cuando estés seguro. Ante la duda, NO emparejes.
+            - Cada evento puede aparecer como máximo en un par.
+            - Solo puedes usar los IDs que aparecen en las listas. NUNCA inventes IDs.
+
+            Responde ÚNICAMENTE con un objeto JSON con esta estructura:
+            {
+              "matches": [
+                {
+                  "event_unique_id": "ID de nuestro evento",
+                  "muxo_event_id": "ID del evento de muxojaleo",
+                  "reason": "Motivo breve en español"
+                }
+              ]
+            }
+            Si no hay coincidencias, devuelve { "matches": [] }.
+            """;
+    }
+
+    private static string BuildCrossMatchUserPrompt(
+        List<CleanupEventItem> ourEvents,
+        List<MuxoEventItem> muxoEvents)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("NUESTROS EVENTOS:");
+
+        foreach (var e in ourEvents)
+        {
+            sb.AppendLine($"--- EVENTO (ID: {e.EventUniqueId}) ---");
+            sb.AppendLine($"título: {TruncateForPrompt(e.Title, 200)}");
+            sb.AppendLine($"fecha: {(e.EventDate?.ToString("yyyy-MM-dd") ?? "(SIN FECHA)")}");
+            sb.AppendLine($"descripción de fecha: {TruncateForPrompt(e.EventDateDescription, 200)}");
+            sb.AppendLine($"recurrente: {e.IsRecurrent}");
+            sb.AppendLine($"tipo de recurrencia: {e.RecurrenceType ?? "(ninguno)"}");
+            sb.AppendLine($"días de la semana: {(string.IsNullOrWhiteSpace(e.RecurrenceDaysOfWeek) ? "(ninguno)" : e.RecurrenceDaysOfWeek)}");
+            sb.AppendLine($"cuenta: {TruncateForPrompt(e.Account, 100)}");
+            sb.AppendLine($"enlace: {e.Url ?? "(ninguno)"}");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("EVENTOS DE MUXOJALEO:");
+
+        foreach (var m in muxoEvents)
+        {
+            sb.AppendLine($"--- EVENTO MUXO (ID: {m.ExternalId}) ---");
+            sb.AppendLine($"título: {TruncateForPrompt(m.Title, 200)}");
+            sb.AppendLine($"fecha: {(m.Date?.ToString("yyyy-MM-dd") ?? "(sin fecha)")}");
+            sb.AppendLine($"lugar: {TruncateForPrompt(m.Venue, 150)}");
+            sb.AppendLine($"categorías: {TruncateForPrompt(m.Categories, 150)}");
+            sb.AppendLine($"enlace: {m.Link ?? "(ninguno)"}");
+        }
+
+        return sb.ToString();
+    }
+
     /// <summary>
     /// Sends one chat request with retries and returns the parsed result, or null when
     /// all attempts produced malformed responses. Transient HTTP errors rethrow after
@@ -438,6 +542,7 @@ public class DeepSeekService : IDeepSeekService
             sb.AppendLine($"inicio recurrencia: {e.RecurrenceStartDate?.ToString("yyyy-MM-dd") ?? "(ninguno)"}");
             sb.AppendLine($"fin recurrencia: {e.RecurrenceEndDate?.ToString("yyyy-MM-dd") ?? "(ninguno)"}");
             sb.AppendLine($"cuenta: {TruncateForPrompt(e.Account, 100)}");
+            sb.AppendLine($"enlace: {e.Url ?? "(ninguno)"}");
             sb.AppendLine($"caption: {TruncateForPrompt(e.Caption, 500)}");
         }
 

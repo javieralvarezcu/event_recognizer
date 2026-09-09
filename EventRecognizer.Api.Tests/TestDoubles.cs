@@ -77,13 +77,16 @@ public sealed class FakeDeepSeekService : IDeepSeekService
 {
     private readonly Func<List<InstagramPost>, string, List<PostAnalysisResult>> _analyze;
     private readonly Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? _findDuplicates;
+    private readonly Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? _findCrossMatches;
 
     public FakeDeepSeekService(
         Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze,
-        Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null)
+        Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null,
+        Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? findCrossMatches = null)
     {
         _analyze = analyze;
         _findDuplicates = findDuplicates;
+        _findCrossMatches = findCrossMatches;
     }
 
     public List<string> ReceivedApiKeys { get; } = new();
@@ -93,6 +96,8 @@ public sealed class FakeDeepSeekService : IDeepSeekService
     public List<CleanupEventItem>? LastCleanupEvents { get; private set; }
 
     public string? LastCleanupMonthLabel { get; private set; }
+
+    public List<MuxoEventItem>? LastCrossMatchMuxoEvents { get; private set; }
 
     public Task<List<PostAnalysisResult>> AnalyzePostsAsync(
         List<InstagramPost> posts,
@@ -118,6 +123,38 @@ public sealed class FakeDeepSeekService : IDeepSeekService
             ? _findDuplicates(events, monthLabel)
             : throw new InvalidOperationException("No findDuplicates delegate configured."));
     }
+
+    public Task<List<CrossMatchResult>> FindCrossMatchesAsync(
+        List<CleanupEventItem> ourEvents,
+        List<MuxoEventItem> muxoEvents,
+        string apiKey,
+        CancellationToken ct = default)
+    {
+        LastCrossMatchMuxoEvents = muxoEvents;
+        ReceivedApiKeys.Add(apiKey);
+        return Task.FromResult(_findCrossMatches != null
+            ? _findCrossMatches(ourEvents, muxoEvents)
+            : throw new InvalidOperationException("No findCrossMatches delegate configured."));
+    }
+}
+
+/// <summary>
+/// IMuxoScraperService fake driven by a delegate.
+/// </summary>
+public sealed class FakeMuxoScraperService : IMuxoScraperService
+{
+    private readonly Func<int, List<MuxoEvent>> _scrape;
+
+    public FakeMuxoScraperService(Func<int, List<MuxoEvent>> scrape)
+        => _scrape = scrape;
+
+    public int LastMonthsAhead { get; private set; } = -1;
+
+    public Task<List<MuxoEvent>> ScrapeUpcomingAsync(int monthsAhead, CancellationToken ct = default)
+    {
+        LastMonthsAhead = monthsAhead;
+        return Task.FromResult(_scrape(monthsAhead));
+    }
 }
 
 /// <summary>
@@ -129,17 +166,20 @@ public sealed class FakeEventService : IEventService
     private readonly Func<string, CancellationToken, Task<EventDetailResponse?>>? _getByUniqueId;
     private readonly Func<CancellationToken, Task<List<EventDetailResponse>>>? _getAll;
     private readonly Func<int, int, string, CancellationToken, Task<CleanupResponse>>? _cleanup;
+    private readonly Func<string, CancellationToken, Task<CrossCheckResponse>>? _crossCheck;
 
     public FakeEventService(
         Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? recognize = null,
         Func<string, CancellationToken, Task<EventDetailResponse?>>? getByUniqueId = null,
         Func<CancellationToken, Task<List<EventDetailResponse>>>? getAll = null,
-        Func<int, int, string, CancellationToken, Task<CleanupResponse>>? cleanup = null)
+        Func<int, int, string, CancellationToken, Task<CleanupResponse>>? cleanup = null,
+        Func<string, CancellationToken, Task<CrossCheckResponse>>? crossCheck = null)
     {
         _recognize = recognize;
         _getByUniqueId = getByUniqueId;
         _getAll = getAll;
         _cleanup = cleanup;
+        _crossCheck = crossCheck;
     }
 
     public DateRange? LastDateRange { get; private set; }
@@ -174,6 +214,11 @@ public sealed class FakeEventService : IEventService
         => _cleanup != null
             ? _cleanup(year, month, deepSeekApiKey, ct)
             : throw new InvalidOperationException("No cleanup delegate configured.");
+
+    public Task<CrossCheckResponse> CrossCheckAsync(string deepSeekApiKey, CancellationToken ct = default)
+        => _crossCheck != null
+            ? _crossCheck(deepSeekApiKey, ct)
+            : throw new InvalidOperationException("No crossCheck delegate configured.");
 }
 
 /// <summary>
@@ -305,7 +350,8 @@ public static class TestData
         DateTime? recurrenceStart = null,
         DateTime? recurrenceEnd = null,
         string? recurrenceDaysOfWeek = null,
-        string? recurrenceType = null)
+        string? recurrenceType = null,
+        string? url = null)
         => new()
         {
             EventUniqueId = eventUniqueId,
@@ -319,6 +365,47 @@ public static class TestData
             RecurrenceDaysOfWeek = recurrenceDaysOfWeek,
             RecurrenceType = recurrenceType,
             IsRecurrent = recurrenceType != null,
+            Url = url ?? $"https://instagram.com/p/{postId}",
             CreatedAt = DateTime.UtcNow
         };
+
+    /// <summary>A muxojaleo event for service-level tests.</summary>
+    public static MuxoEvent CreateMuxoEvent(
+        string externalId,
+        string title,
+        DateTime? date = null,
+        string? venue = null,
+        string? link = null,
+        string? categories = null)
+        => new()
+        {
+            ExternalId = externalId,
+            Title = title,
+            Date = date,
+            Venue = venue,
+            Link = link,
+            Categories = categories,
+            CreatedAt = DateTime.UtcNow
+        };
+
+    /// <summary>
+    /// Serializes the DeepSeek envelope whose content holds the cross-match JSON
+    /// {"matches": [...]} that FindCrossMatchesAsync parses.
+    /// </summary>
+    public static string BuildCrossMatchDeepSeekResponse(List<CrossMatchResult> matches)
+    {
+        var content = JsonSerializer.Serialize(new CrossMatchBatchResult { Matches = matches });
+        var envelope = new DeepSeekResponse
+        {
+            Choices = new List<DeepSeekChoice>
+            {
+                new()
+                {
+                    Message = new DeepSeekChoiceMessage { Content = content },
+                    FinishReason = "stop"
+                }
+            }
+        };
+        return JsonSerializer.Serialize(envelope);
+    }
 }

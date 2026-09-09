@@ -10,6 +10,7 @@ API para reconocer automáticamente carteles de eventos en publicaciones de Inst
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Endpoints de la API](#endpoints-de-la-api)
 - [Panel web (calendario)](#panel-web-calendario)
+- [Cruce con muxojaleo.com](#cruce-con-muxojaleocom)
 - [Esquema de base de datos](#esquema-de-base-de-datos)
 - [Requisitos](#requisitos)
 - [Configuración local (desarrollo)](#configuración-local-desarrollo)
@@ -71,6 +72,7 @@ Cliente HTTP
     │
     │  POST /api/events/recognize   (header: X-DeepSeek-API-Key)
     │  POST /api/events/cleanup     (header: X-DeepSeek-API-Key)
+    │  POST /api/events/crosscheck  (header: X-DeepSeek-API-Key)
     │  GET  /api/events
     │  GET  /api/events/{eventUniqueId}
     │  GET  /                        (panel web estático: calendario)
@@ -125,13 +127,18 @@ event_recognizer/
     │   ├── DateRange.cs                  # Rango de fechas opcional (from/to)
     │   ├── DeepSeekModels.cs             # DTOs para la API de DeepSeek
     │   ├── EventRecord.cs                # Entidad de base de datos
-    │   └── InstagramPost.cs              # DTO de entrada (post de Instagram)
+    │   ├── InstagramPost.cs              # DTO de entrada (post de Instagram)
+    │   ├── MuxoEvent.cs                  # Evento raspado de muxojaleo.com
+    │   └── CrossMatch.cs                 # Cruce entre EventRecord y MuxoEvent
     └── Services/
         ├── IDeepSeekService.cs
         ├── DeepSeekService.cs            # Cliente HTTP para DeepSeek
         ├── IEventService.cs
         ├── EventService.cs               # Orquestador de reconocimiento
-        └── RecurrenceEvaluator.cs        # Evalúa si un evento/recurrencia cae en un rango
+        ├── IMuxoScraperService.cs
+        ├── MuxoScraperService.cs         # Scraping de muxojaleo.com/calendario
+        ├── RecurrenceEvaluator.cs        # Evalúa si un evento/recurrencia cae en un rango
+        └── ScrapeException.cs            # Error al raspar muxojaleo.com
 └── EventRecognizer.Api.Tests/           # Proyecto de tests (xUnit + SQLite en memoria)
     ├── TestDoubles.cs                    # Fakes y builders compartidos
     ├── DeepSeekServiceTests.cs
@@ -395,6 +402,53 @@ Limpia un mes de eventos duplicados. Envía al LLM los eventos que ocurren en el
 
 ---
 
+### `POST /api/events/crosscheck`
+
+Cruza nuestros eventos con el calendario de [muxojaleo.com](https://muxojaleo.com/calendario):
+
+1. Raspa el calendario (mes actual + 2 siguientes) y guarda los eventos en la tabla `MuxoEvents`, sin duplicados (clave única `ExternalId`) y actualizando los campos si el sitio los cambió.
+2. Envía nuestros eventos + los de muxojaleo al LLM, que decide qué pares son el mismo evento real (compara título, fecha, lugar, cuenta y enlaces; si el enlace de Instagram coincide es una coincidencia segura).
+3. Persiste los cruces nuevos en `CrossMatches` (uno por evento y por evento de muxojaleo; los ya existentes no se duplican).
+
+**Headers requeridos:**
+
+| Header | Descripción |
+|---|---|
+| `X-DeepSeek-API-Key` | Token de API de DeepSeek (proporcionado por el cliente) |
+
+**Response 200:**
+
+```json
+{
+  "muxoEventsScraped": 27,
+  "muxoEventsNew": 27,
+  "ourEventsAnalyzed": 145,
+  "matchesFound": 3,
+  "matches": [
+    {
+      "eventUniqueId": "EVT-20260902-A1B2C3D4",
+      "eventTitle": "Jam de poesía",
+      "muxoTitle": "Jam de poesía",
+      "muxoDate": "2026-09-09T12:00:00",
+      "muxoLink": "https://www.instagram.com/p/Dcx7jHWtQeM/",
+      "reason": "Mismo título, misma fecha y mismo enlace"
+    }
+  ]
+}
+```
+
+**Códigos de error:**
+
+| Código | Significado |
+|---|---|
+| `401` | Falta el header `X-DeepSeek-API-Key` |
+| `500` | Error al parsear la respuesta del LLM, o al guardar en la BD |
+| `502` | No se pudo raspar muxojaleo.com (red o estructura cambiada), o fallo de comunicación con DeepSeek |
+
+Los endpoints `GET /api/events` y `GET /api/events/{eventUniqueId}` incluyen los campos `isCrossed`, `muxoTitle`, `muxoLink` y `muxoDate` cuando el evento está cruzado.
+
+---
+
 ## Esquema de base de datos
 
 ### Tabla `EventRecords`
@@ -430,6 +484,30 @@ Limpia un mes de eventos duplicados. Envía al LLM los eventos que ocurren en el
 | `IX_EventRecords_Account` | `Account` | No único |
 | `IX_EventRecords_EventDate` | `EventDate` | No único |
 | `IX_EventRecords_CreatedAt` | `CreatedAt` | No único |
+
+### Tabla `MuxoEvents` (eventos raspados de muxojaleo.com)
+
+| Columna | Tipo | Restricciones | Descripción |
+|---|---|---|---|
+| `Id` | `int` | PK, IDENTITY | Clave primaria autoincremental |
+| `ExternalId` | `nvarchar(50)` | NOT NULL, UNIQUE | ID del evento en muxojaleo.com (evita duplicados al raspar) |
+| `Title` | `nvarchar(300)` | NOT NULL | Título del evento en muxojaleo.com |
+| `Date` | `datetime2` | NULL | Fecha del evento publicada en el sitio |
+| `Venue` | `nvarchar(200)` | NULL | Espacio/lugar (p. ej. "Círculo Juan 23") |
+| `Link` | `nvarchar(500)` | NULL | Enlace publicado (normalmente un post de Instagram) |
+| `Categories` | `nvarchar(200)` | NULL | Categorías separadas por comas |
+| `Price` | `nvarchar(100)` | NULL | Precio ("Gratis", "5€"…) |
+| `CreatedAt` | `datetime2` | NOT NULL | Fecha de creación del registro |
+
+### Tabla `CrossMatches` (cruces EventRecord ↔ MuxoEvent)
+
+| Columna | Tipo | Restricciones | Descripción |
+|---|---|---|---|
+| `Id` | `int` | PK, IDENTITY | Clave primaria autoincremental |
+| `EventUniqueId` | `nvarchar(50)` | NOT NULL, UNIQUE | Nuestro evento (un cruce por evento) |
+| `MuxoEventId` | `int` | NOT NULL, UNIQUE, FK→`MuxoEvents` | Evento de muxojaleo (un cruce por evento muxo) |
+| `Reason` | `nvarchar(500)` | NULL | Motivo del cruce dado por el LLM |
+| `CreatedAt` | `datetime2` | NOT NULL | Fecha de creación del cruce |
 
 ---
 
@@ -555,12 +633,27 @@ Características:
 - Los eventos recurrentes semanales se muestran en **todas** sus ocurrencias; los eventos de varios días ("daily") se muestran como un rango que abarca sus días.
 - Clic en un evento → modal con toda la información: título, resumen, fecha, descripción de fecha, recurrencia humanizada, cuenta, fecha de publicación, enlace al post y su imagen.
 - Los eventos sin ninguna fecha computable se listan aparte en "Eventos sin fecha".
-- Botón **"Limpiar mes"**: envía los eventos del mes visible (más los sin fecha) al LLM para detectar y eliminar duplicados. Requiere la API key de DeepSeek (se guarda en `localStorage` del navegador).
+- Botón **"Limpiar mes"**: envía los eventos del mes visible (más los sin fecha) al LLM para detectar y eliminar duplicados.
+- Botón **"Cruzar con muxojaleo"**: raspa muxojaleo.com, guarda sus eventos y los cruza con los nuestros mediante el LLM. Los eventos cruzados se pintan de **verde** y el check "Mostrar eventos cruzados" permite ocultarlos o mostrarlos; en el modal del evento aparece la entrada "En muxojaleo.com".
+- Ambas acciones requieren la API key de DeepSeek (se guarda en `localStorage` del navegador) y usan confirmación en dos pasos.
 - Sin autenticación (igual que los endpoints `GET`).
 
 > ⚠️ FullCalendar se carga por CDN (jsdelivr), por lo que el **navegador** del usuario necesita acceso a Internet. La API en sí no depende del CDN.
 
 Swagger UI sigue disponible en `/swagger`.
+
+---
+
+## Cruce con muxojaleo.com
+
+La API puede cruzar sus eventos con el calendario público de [muxojaleo.com](https://muxojaleo.com/calendario):
+
+- **Scraping sin navegador**: la página es una app Astro que renderiza los eventos dentro de un tag `astro-island` con las props serializadas (formato seroval), así que `MuxoScraperService` la pide por HTTP con `?month=yyyy-MM` y parsea el HTML con una regex + `System.Text.Json`. No se usa headless browser.
+- **Persistencia**: los eventos de muxojaleo se guardan en la tabla `MuxoEvents` (clave única `ExternalId`). Solo se raspa y se llama al LLM al pulsar el botón; las ejecuciones repetidas no duplican nada (y actualizan los campos si el sitio los cambió).
+- **Cruce con LLM**: `DeepSeekService.FindCrossMatchesAsync` envía ambas listas y el modelo devuelve los pares `{event_unique_id, muxo_event_id, reason}`. El servidor solo persiste pares válidos (ambos IDs existentes) y no duplicados; cada evento y cada evento de muxojaleo se cruza como máximo una vez.
+- **Display**: `GET /api/events` devuelve `isCrossed` + los datos del evento de muxojaleo; el panel pinta esos eventos en verde y permite filtrarlos con el check "Mostrar eventos cruzados".
+
+> ⚠️ Si muxojaleo.com cambia la estructura de su HTML, el scraping fallará con un mensaje claro (HTTP 502) y no tocará la BD. La tabla `MuxoEvents` conserva lo ya raspado.
 
 ---
 
@@ -696,7 +789,7 @@ Ejemplo: `EVT-20260728-A1B2C3D4E5F6`
 
 La API **no** implementa autenticación de usuarios (JWT, OAuth, etc.). En su lugar:
 
-- Los endpoints `POST /api/events/recognize` y `POST /api/events/cleanup` requieren que el **cliente** proporcione su propia API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
+- Los endpoints `POST /api/events/recognize`, `POST /api/events/cleanup` y `POST /api/events/crosscheck` requieren que el **cliente** proporcione su propia API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
 - Los endpoints `GET /api/events` y `GET /api/events/{eventUniqueId}`, así como el panel web, son públicos.
 
 ### Secretos en el repositorio
@@ -743,6 +836,7 @@ dotnet ef database update \
 | Migración | Descripción |
 |---|---|
 | `20260902013644_InitialCreate` | Creación de la tabla `EventRecords` con los índices y las columnas de recurrencia (`IsRecurrent`, `RecurrenceType`, `RecurrenceDaysOfWeek`, `RecurrenceStartDate`, `RecurrenceEndDate`). |
+| `20260909223841_AddMuxoEventsAndCrossMatches` | Tablas `MuxoEvents` (eventos de muxojaleo.com, `ExternalId` único) y `CrossMatches` (cruces con `EventRecords`, únicos por evento y por evento muxo, FK con borrado en cascada). |
 
 > ⚠️ **La migración inicial se regeneró** al añadir las columnas de recurrencia. Las bases de datos existentes **deben recrearse**: borra la base de datos (o el volumen `sqlserver-data` con `docker compose down -v`) y deja que la aplicación la cree de nuevo al arrancar.
 

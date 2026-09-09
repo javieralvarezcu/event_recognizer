@@ -11,6 +11,10 @@ public class AppDbContext : DbContext
 
     public DbSet<EventRecord> EventRecords => Set<EventRecord>();
 
+    public DbSet<MuxoEvent> MuxoEvents => Set<MuxoEvent>();
+
+    public DbSet<CrossMatch> CrossMatches => Set<CrossMatch>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<EventRecord>(entity =>
@@ -26,6 +30,26 @@ public class AppDbContext : DbContext
             entity.HasIndex(e => e.EventDate);
 
             entity.HasIndex(e => e.CreatedAt);
+        });
+
+        modelBuilder.Entity<MuxoEvent>(entity =>
+        {
+            entity.HasIndex(e => e.ExternalId)
+                  .IsUnique();
+        });
+
+        modelBuilder.Entity<CrossMatch>(entity =>
+        {
+            entity.HasIndex(m => m.EventUniqueId)
+                  .IsUnique();
+
+            entity.HasIndex(m => m.MuxoEventId)
+                  .IsUnique();
+
+            entity.HasOne(m => m.MuxoEvent)
+                  .WithMany()
+                  .HasForeignKey(m => m.MuxoEventId)
+                  .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

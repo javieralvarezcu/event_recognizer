@@ -82,6 +82,9 @@ public class CleanupEventItem
     public string? Account { get; set; }
 
     public string? Caption { get; set; }
+
+    /// <summary>URL of the original post (strong duplicate/match signal).</summary>
+    public string? Url { get; set; }
 }
 
 /// <summary>
@@ -107,6 +110,50 @@ public class DuplicateGroupResult
     /// <summary>Short reason in Spanish (optional).</summary>
     [JsonPropertyName("reason")]
     public string? Reason { get; set; }
+}
+
+/// <summary>
+/// A muxojaleo.com event sent to the LLM for cross-matching against our events.
+/// </summary>
+public class MuxoEventItem
+{
+    /// <summary>Id assigned by muxojaleo.com (what the LLM must reference in its answer).</summary>
+    public string ExternalId { get; set; } = string.Empty;
+
+    public string? Title { get; set; }
+
+    public DateTime? Date { get; set; }
+
+    public string? Venue { get; set; }
+
+    public string? Categories { get; set; }
+
+    public string? Link { get; set; }
+}
+
+/// <summary>
+/// LLM response for cross-matching: pairs (our event, muxojaleo event) that describe
+/// the same real-world event.
+/// </summary>
+public class CrossMatchResult
+{
+    [JsonPropertyName("event_unique_id")]
+    public string EventUniqueId { get; set; } = string.Empty;
+
+    [JsonPropertyName("muxo_event_id")]
+    public string MuxoEventId { get; set; } = string.Empty;
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
+}
+
+/// <summary>
+/// Wrapper of the LLM cross-matching response.
+/// </summary>
+public class CrossMatchBatchResult
+{
+    [JsonPropertyName("matches")]
+    public List<CrossMatchResult> Matches { get; set; } = new();
 }
 
 // --- DeepSeek API HTTP DTOs ---

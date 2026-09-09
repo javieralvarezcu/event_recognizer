@@ -48,4 +48,12 @@ public interface IEventService
         int month,
         string deepSeekApiKey,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Scrapes the muxojaleo.com calendar (persisting new events), cross-matches our
+    /// persisted events against it via the LLM, and persists the new matches.
+    /// </summary>
+    /// <param name="deepSeekApiKey">The DeepSeek API key from the request header.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<CrossCheckResponse> CrossCheckAsync(string deepSeekApiKey, CancellationToken ct = default);
 }

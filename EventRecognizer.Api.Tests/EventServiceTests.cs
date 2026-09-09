@@ -12,8 +12,14 @@ public class EventServiceTests
     private static EventService CreateService(
         AppDbContext db,
         Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze,
-        Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null)
-        => new(new FakeDeepSeekService(analyze, findDuplicates), db, NullLogger<EventService>.Instance);
+        Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null,
+        Func<int, List<MuxoEvent>>? scrape = null,
+        Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? findCrossMatches = null)
+        => new(
+            new FakeDeepSeekService(analyze, findDuplicates, findCrossMatches),
+            new FakeMuxoScraperService(scrape ?? (_ => new List<MuxoEvent>())),
+            db,
+            NullLogger<EventService>.Instance);
 
     [Fact]
     public async Task RecognizeEventsAsync_PersistsOnlyEventPosts_AndReturnsAllPosts()
@@ -513,6 +519,153 @@ public class EventServiceTests
     }
 
     [Fact]
+    public async Task CrossCheckAsync_ScrapesAndPersistsMuxoEventsDeduplicatedByExternalId()
+    {
+        using var fixture = new TestDatabase();
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            scrape: _ => new List<MuxoEvent>
+            {
+                TestData.CreateMuxoEvent("11", "Jam de poesía"),
+                TestData.CreateMuxoEvent("12", "Concierto")
+            });
+
+        var first = await service.CrossCheckAsync("key");
+
+        Assert.Equal(2, first.MuxoEventsScraped);
+        Assert.Equal(2, first.MuxoEventsNew);
+        Assert.Equal(2, await fixture.Db.MuxoEvents.CountAsync());
+
+        // Second run: same events again (one with an updated title) + a new one.
+        var secondService = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            scrape: _ => new List<MuxoEvent>
+            {
+                TestData.CreateMuxoEvent("11", "Jam de poesía (actualizado)"),
+                TestData.CreateMuxoEvent("12", "Concierto"),
+                TestData.CreateMuxoEvent("13", "Teatro")
+            });
+
+        var second = await secondService.CrossCheckAsync("key");
+
+        Assert.Equal(3, second.MuxoEventsScraped);
+        Assert.Equal(1, second.MuxoEventsNew);
+        Assert.Equal(3, await fixture.Db.MuxoEvents.CountAsync());
+        var stored11 = await fixture.Db.MuxoEvents.SingleAsync(m => m.ExternalId == "11");
+        Assert.Equal("Jam de poesía (actualizado)", stored11.Title);
+    }
+
+    [Fact]
+    public async Task CrossCheckAsync_PersistsOnlyValidNewMatches()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            TestData.CreateRecord("EVT-1", "Jam de poesía", postId: "p1", eventDate: new DateTime(2026, 9, 9)),
+            TestData.CreateRecord("EVT-2", "Concierto", postId: "p2", eventDate: new DateTime(2026, 9, 11)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            scrape: _ => new List<MuxoEvent>
+            {
+                TestData.CreateMuxoEvent("11", "Jam de poesía", new DateTime(2026, 9, 9), "Círculo Juan 23",
+                    "https://www.instagram.com/p/X/"),
+                TestData.CreateMuxoEvent("12", "Concierto", new DateTime(2026, 9, 11), "Sala X")
+            },
+            findCrossMatches: (_, _) => new List<CrossMatchResult>
+            {
+                new() { EventUniqueId = "EVT-1", MuxoEventId = "11", Reason = "Mismo título y fecha" },
+                new() { EventUniqueId = "EVT-2", MuxoEventId = "12" },
+                new() { EventUniqueId = "EVT-GHOST", MuxoEventId = "11" },   // unknown event: ignored
+                new() { EventUniqueId = "EVT-2", MuxoEventId = "999" }       // unknown muxo: ignored
+            });
+
+        var response = await service.CrossCheckAsync("key");
+
+        Assert.Equal(2, response.OurEventsAnalyzed);
+        Assert.Equal(2, response.MatchesFound);
+        Assert.Equal(2, await fixture.Db.CrossMatches.CountAsync());
+
+        var match1 = response.Matches.Single(m => m.EventUniqueId == "EVT-1");
+        Assert.Equal("Jam de poesía", match1.EventTitle);
+        Assert.Equal("Jam de poesía", match1.MuxoTitle);
+        Assert.Equal("https://www.instagram.com/p/X/", match1.MuxoLink);
+        Assert.Equal("Mismo título y fecha", match1.Reason);
+    }
+
+    [Fact]
+    public async Task CrossCheckAsync_SkipsAlreadyPersistedPairs()
+    {
+        using var fixture = new TestDatabase();
+        var ourEvent = TestData.CreateRecord("EVT-1", "Jam de poesía", postId: "p1");
+        var muxoEvent = TestData.CreateMuxoEvent("11", "Jam de poesía");
+        fixture.Db.EventRecords.Add(ourEvent);
+        fixture.Db.MuxoEvents.Add(muxoEvent);
+        await fixture.Db.SaveChangesAsync();
+        fixture.Db.CrossMatches.Add(new CrossMatch { EventUniqueId = "EVT-1", MuxoEventId = muxoEvent.Id });
+        fixture.Db.EventRecords.Add(TestData.CreateRecord("EVT-2", "Concierto", postId: "p2"));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            scrape: _ => new List<MuxoEvent> { muxoEvent, TestData.CreateMuxoEvent("12", "Concierto") },
+            findCrossMatches: (_, _) => new List<CrossMatchResult>
+            {
+                new() { EventUniqueId = "EVT-1", MuxoEventId = "11" }, // already persisted
+                new() { EventUniqueId = "EVT-2", MuxoEventId = "12" }
+            });
+
+        var response = await service.CrossCheckAsync("key");
+
+        Assert.Equal(1, response.MatchesFound);
+        Assert.Equal(2, await fixture.Db.CrossMatches.CountAsync());
+        Assert.Equal("EVT-2", Assert.Single(response.Matches).EventUniqueId);
+    }
+
+    [Fact]
+    public async Task CrossCheckAsync_WithNoMuxoEvents_DoesNotCallLlm()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(TestData.CreateRecord("EVT-1", "Evento", postId: "p1"));
+        await fixture.Db.SaveChangesAsync();
+
+        var called = false;
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            scrape: _ => new List<MuxoEvent>(),
+            findCrossMatches: (_, _) => { called = true; return new List<CrossMatchResult>(); });
+
+        var response = await service.CrossCheckAsync("key");
+
+        Assert.Equal(1, response.OurEventsAnalyzed);
+        Assert.Equal(0, response.MatchesFound);
+        Assert.False(called);
+    }
+
+    [Fact]
+    public async Task GetAllEventsAsync_IncludesCrossMatchInfo()
+    {
+        using var fixture = new TestDatabase();
+        var ourEvent = TestData.CreateRecord("EVT-1", "Jam de poesía", postId: "p1");
+        var muxoEvent = TestData.CreateMuxoEvent("11", "Jam de poesía", new DateTime(2026, 9, 9), "Círculo Juan 23",
+            "https://www.instagram.com/p/X/");
+        fixture.Db.EventRecords.Add(ourEvent);
+        fixture.Db.MuxoEvents.Add(muxoEvent);
+        await fixture.Db.SaveChangesAsync();
+        fixture.Db.CrossMatches.Add(new CrossMatch { EventUniqueId = "EVT-1", MuxoEventId = muxoEvent.Id });
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var list = await service.GetAllEventsAsync();
+        var dto = Assert.Single(list);
+        Assert.True(dto.IsCrossed);
+        Assert.Equal("Jam de poesía", dto.MuxoTitle);
+        Assert.Equal("https://www.instagram.com/p/X/", dto.MuxoLink);
+        Assert.Equal(new DateTime(2026, 9, 9), dto.MuxoDate);
+
+        var detail = await service.GetEventByUniqueIdAsync("EVT-1");
+        Assert.NotNull(detail);
+        Assert.True(detail.IsCrossed);
+        Assert.Equal("Jam de poesía", detail.MuxoTitle);
+    }
+
+    [Fact]
     public async Task RecognizeEventsAsync_WithRange_PassesRangeToDeepSeekService()
     {
         using var fixture = new TestDatabase();
@@ -520,7 +673,7 @@ public class EventServiceTests
         {
             TestData.NonEventResult()
         });
-        var service = new EventService(fake, fixture.Db, NullLogger<EventService>.Instance);
+        var service = new EventService(fake, new FakeMuxoScraperService(_ => new List<MuxoEvent>()), fixture.Db, NullLogger<EventService>.Instance);
         var range = Range("2026-09-01", "2026-09-30");
 
         await service.RecognizeEventsAsync(

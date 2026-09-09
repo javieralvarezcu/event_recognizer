@@ -48,6 +48,12 @@ function formatDateOnly(dateOnly) {
 function buildCalendarEvent(e) {
   const base = { title: e.title || 'Sin título', allDay: true, extendedProps: e };
 
+  // Los eventos cruzados con muxojaleo.com se pintan en verde.
+  if (e.isCrossed) {
+    base.backgroundColor = '#2e7d4f';
+    base.borderColor = '#2e7d4f';
+  }
+
   if (e.recurrenceType === 'weekly') {
     const days = (e.recurrenceDaysOfWeek || '')
       .split(',')
@@ -144,6 +150,20 @@ function openModal(e) {
 
   $('modal-caption').textContent = e.caption || '';
 
+  // Fila "En muxojaleo.com": solo visible cuando el evento está cruzado.
+  const muxoLabel = $('modal-muxo-label');
+  const muxoValue = $('modal-muxo');
+  if (e.isCrossed) {
+    muxoLabel.classList.remove('hidden');
+    muxoValue.classList.remove('hidden');
+    const parts = [e.muxoTitle || 'Evento de muxojaleo'];
+    if (e.muxoDate) parts.push(formatDateOnly(toDateOnly(e.muxoDate)));
+    muxoValue.textContent = parts.join(' — ');
+  } else {
+    muxoLabel.classList.add('hidden');
+    muxoValue.classList.add('hidden');
+  }
+
   $('modal-overlay').classList.remove('hidden');
 }
 
@@ -219,6 +239,14 @@ function showError(message) {
   $('error-banner').classList.remove('hidden');
 }
 
+// Todos los eventos cargados (sin filtrar) y el filtro de eventos cruzados.
+let allEvents = [];
+let showCrossed = true;
+
+function visibleEvents() {
+  return showCrossed ? allEvents : allEvents.filter((e) => !e.isCrossed);
+}
+
 async function init() {
   $('error-banner').classList.add('hidden');
 
@@ -230,13 +258,19 @@ async function init() {
   try {
     const res = await fetch('/api/events');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const events = await res.json();
-    renderCalendar(events);
-    renderNoDateList(events);
+    allEvents = await res.json();
+    renderCalendar(visibleEvents());
+    renderNoDateList(allEvents);
   } catch {
     showError('No se pudieron cargar los eventos. Comprueba que la API está en marcha.');
   }
 }
+
+// Mostrar/ocultar los eventos cruzados con muxojaleo.com.
+$('show-crossed').addEventListener('change', (event) => {
+  showCrossed = event.target.checked;
+  renderCalendar(visibleEvents());
+});
 
 // Modal: cerrar con botón, clic fuera o Escape.
 $('modal-close').addEventListener('click', closeModal);
@@ -273,7 +307,7 @@ function storeCleanupKey(key) {
 
 function showCleanupResult(kind, title, lines) {
   cleanupResult.replaceChildren();
-  cleanupResult.className = kind;
+  cleanupResult.className = `action-result ${kind}`;
   const heading = document.createElement('p');
   heading.textContent = title;
   cleanupResult.appendChild(heading);
@@ -375,5 +409,103 @@ async function runCleanup() {
 }
 
 cleanupButton.addEventListener('click', runCleanup);
+
+// --- Cruce con muxojaleo.com ---
+const crosscheckButton = $('crosscheck-button');
+const crosscheckResult = $('crosscheck-result');
+
+function showCrossCheckResult(kind, title, lines) {
+  crosscheckResult.replaceChildren();
+  crosscheckResult.className = `action-result ${kind}`;
+  const heading = document.createElement('p');
+  heading.textContent = title;
+  crosscheckResult.appendChild(heading);
+  if (lines && lines.length > 0) {
+    const list = document.createElement('ul');
+    for (const line of lines) {
+      const item = document.createElement('li');
+      item.textContent = line;
+      list.appendChild(item);
+    }
+    crosscheckResult.appendChild(list);
+  }
+}
+
+let crosscheckTimer = null;
+
+function disarmCrossCheck() {
+  clearTimeout(crosscheckTimer);
+  crosscheckButton.dataset.confirm = 'false';
+  crosscheckButton.classList.remove('confirm');
+  crosscheckButton.textContent = 'Cruzar con muxojaleo';
+}
+
+async function runCrossCheck() {
+  const key = cleanupKeyInput.value.trim();
+  if (!key) {
+    cleanupKeyInput.focus();
+    showCrossCheckResult('error', 'Introduce tu API key de DeepSeek para poder cruzar con muxojaleo.');
+    return;
+  }
+
+  if (crosscheckButton.dataset.confirm !== 'true') {
+    // Primer clic: pedir confirmación explícita.
+    storeCleanupKey(key);
+    crosscheckButton.dataset.confirm = 'true';
+    crosscheckButton.classList.add('confirm');
+    crosscheckButton.textContent = '¿Seguro? Pulsa de nuevo';
+    showCrossCheckResult('ok',
+      'Se raspará el calendario de muxojaleo.com (3 meses), se guardarán sus eventos y el LLM ' +
+      'cruzará los nuestros con los suyos. Pulsa otra vez el botón para confirmar.');
+    clearTimeout(crosscheckTimer);
+    crosscheckTimer = setTimeout(disarmCrossCheck, 8000);
+    return;
+  }
+
+  disarmCrossCheck();
+  crosscheckButton.disabled = true;
+  crosscheckButton.textContent = 'Raspando y cruzando…';
+  showCrossCheckResult('ok', 'Raspando muxojaleo.com y analizando con el LLM…');
+  try {
+    const res = await fetch('/api/events/crosscheck', {
+      method: 'POST',
+      headers: { 'X-DeepSeek-API-Key': key }
+    });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const err = await res.json();
+        detail = err.detail || err.error || detail;
+      } catch {
+        /* respuesta sin JSON */
+      }
+      showCrossCheckResult('error', `El cruce falló: ${detail}`);
+      return;
+    }
+
+    const result = await res.json();
+    const lines = [];
+    if (result.matchesFound === 0) {
+      lines.push('El LLM no encontró coincidencias nuevas entre nuestros eventos y muxojaleo.');
+    }
+    for (const m of result.matches || []) {
+      const muxo = m.muxoTitle || m.muxoLink || 'evento de muxojaleo';
+      const reason = m.reason ? ` — ${m.reason}` : '';
+      lines.push(`«${m.eventTitle || m.eventUniqueId}» ↔ «${muxo}»${reason}`);
+    }
+    showCrossCheckResult('ok',
+      `Cruce completado: ${result.muxoEventsScraped} eventos de muxojaleo raspados ` +
+      `(${result.muxoEventsNew} nuevos guardados), ${result.ourEventsAnalyzed} nuestros analizados, ` +
+      `${result.matchesFound} cruces nuevos.`, lines);
+    await init(); // refresca el calendario: los cruzados aparecen en verde
+  } catch {
+    showCrossCheckResult('error', 'No se pudo contactar con la API.');
+  } finally {
+    crosscheckButton.disabled = false;
+    crosscheckButton.textContent = 'Cruzar con muxojaleo';
+  }
+}
+
+crosscheckButton.addEventListener('click', runCrossCheck);
 
 init();

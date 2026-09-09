@@ -9,13 +9,22 @@ namespace EventRecognizer.Api.Services;
 
 public class EventService : IEventService
 {
+    // How many months after the current one are scraped on each crosscheck run.
+    private const int MuxoMonthsAhead = 2;
+
     private readonly IDeepSeekService _deepSeekService;
+    private readonly IMuxoScraperService _muxoScraperService;
     private readonly AppDbContext _dbContext;
     private readonly ILogger<EventService> _logger;
 
-    public EventService(IDeepSeekService deepSeekService, AppDbContext dbContext, ILogger<EventService> logger)
+    public EventService(
+        IDeepSeekService deepSeekService,
+        IMuxoScraperService muxoScraperService,
+        AppDbContext dbContext,
+        ILogger<EventService> logger)
     {
         _deepSeekService = deepSeekService;
+        _muxoScraperService = muxoScraperService;
         _dbContext = dbContext;
         _logger = logger;
     }
@@ -149,7 +158,12 @@ public class EventService : IEventService
         if (record == null)
             return null;
 
-        return MapToDetailDto(record);
+        var match = await _dbContext.CrossMatches
+            .Include(m => m.MuxoEvent)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(m => m.EventUniqueId == eventUniqueId, ct);
+
+        return MapToDetailDto(record, match);
     }
 
     public async Task<List<EventDetailResponse>> GetAllEventsAsync(CancellationToken ct = default)
@@ -161,7 +175,142 @@ public class EventService : IEventService
             .ThenBy(e => e.CreatedAt)
             .ToListAsync(ct);
 
-        return records.Select(MapToDetailDto).ToList();
+        var matches = await _dbContext.CrossMatches
+            .Include(m => m.MuxoEvent)
+            .AsNoTracking()
+            .Where(m => records.Select(r => r.EventUniqueId).Contains(m.EventUniqueId))
+            .ToDictionaryAsync(m => m.EventUniqueId, ct);
+
+        return records.Select(r => MapToDetailDto(r, matches.GetValueOrDefault(r.EventUniqueId))).ToList();
+    }
+
+    public async Task<CrossCheckResponse> CrossCheckAsync(string deepSeekApiKey, CancellationToken ct = default)
+    {
+        // 1. Scrape the muxojaleo calendar and upsert the events (dedupe by external id,
+        //    updating the fields when the site changed them).
+        var scraped = await _muxoScraperService.ScrapeUpcomingAsync(MuxoMonthsAhead, ct);
+
+        var externalIds = scraped.Select(e => e.ExternalId).ToList();
+        var storedByExternalId = await _dbContext.MuxoEvents
+            .Where(m => externalIds.Contains(m.ExternalId))
+            .ToDictionaryAsync(m => m.ExternalId, ct);
+
+        var newMuxoEvents = new List<MuxoEvent>();
+        var changed = false;
+        foreach (var scrapedEvent in scraped)
+        {
+            if (storedByExternalId.TryGetValue(scrapedEvent.ExternalId, out var stored))
+            {
+                if (stored.Title != scrapedEvent.Title || stored.Date != scrapedEvent.Date ||
+                    stored.Venue != scrapedEvent.Venue || stored.Link != scrapedEvent.Link ||
+                    stored.Categories != scrapedEvent.Categories || stored.Price != scrapedEvent.Price)
+                {
+                    stored.Title = scrapedEvent.Title;
+                    stored.Date = scrapedEvent.Date;
+                    stored.Venue = scrapedEvent.Venue;
+                    stored.Link = scrapedEvent.Link;
+                    stored.Categories = scrapedEvent.Categories;
+                    stored.Price = scrapedEvent.Price;
+                    changed = true;
+                }
+            }
+            else
+            {
+                newMuxoEvents.Add(scrapedEvent);
+                changed = true;
+            }
+        }
+
+        if (newMuxoEvents.Count > 0)
+            _dbContext.MuxoEvents.AddRange(newMuxoEvents);
+
+        if (changed)
+            await _dbContext.SaveChangesAsync(ct);
+
+        // 2. Ask the LLM for matches between our events and the muxojaleo events.
+        var ourEvents = await _dbContext.EventRecords.AsNoTracking().ToListAsync(ct);
+        var muxoEvents = await _dbContext.MuxoEvents.AsNoTracking().ToListAsync(ct);
+
+        List<CrossMatchResult> matches = new();
+        if (ourEvents.Count > 0 && muxoEvents.Count > 0)
+        {
+            var ourItems = ourEvents.Select(ToCleanupItem).ToList();
+            var muxoItems = muxoEvents.Select(m => new MuxoEventItem
+            {
+                ExternalId = m.ExternalId,
+                Title = m.Title,
+                Date = m.Date,
+                Venue = m.Venue,
+                Categories = m.Categories,
+                Link = m.Link
+            }).ToList();
+
+            matches = await _deepSeekService.FindCrossMatchesAsync(ourItems, muxoItems, deepSeekApiKey, ct);
+        }
+
+        // 3. Persist only new, valid matches (both ids must exist and the pair must not
+        //    be persisted yet; each event and each muxo event matches at most once).
+        var validOurIds = ourEvents.Select(e => e.EventUniqueId).ToHashSet();
+        var muxoIdByExternalId = muxoEvents.ToDictionary(m => m.ExternalId);
+        var existingPairs = await _dbContext.CrossMatches
+            .AsNoTracking()
+            .Select(m => new { m.EventUniqueId, m.MuxoEventId })
+            .ToListAsync(ct);
+
+        var usedMuxoIds = existingPairs.Select(p => p.MuxoEventId).ToHashSet();
+        var usedEventIds = existingPairs.Select(p => p.EventUniqueId).ToHashSet();
+
+        var newMatches = new List<CrossMatch>();
+        foreach (var pair in matches)
+        {
+            if (!validOurIds.Contains(pair.EventUniqueId) || usedEventIds.Contains(pair.EventUniqueId))
+                continue;
+            if (!muxoIdByExternalId.TryGetValue(pair.MuxoEventId, out var muxoEvent) ||
+                usedMuxoIds.Contains(muxoEvent.Id))
+                continue;
+
+            newMatches.Add(new CrossMatch
+            {
+                EventUniqueId = pair.EventUniqueId,
+                MuxoEventId = muxoEvent.Id,
+                Reason = pair.Reason
+            });
+            usedEventIds.Add(pair.EventUniqueId);
+            usedMuxoIds.Add(muxoEvent.Id);
+        }
+
+        if (newMatches.Count > 0)
+        {
+            _dbContext.CrossMatches.AddRange(newMatches);
+            await _dbContext.SaveChangesAsync(ct);
+            _logger.LogInformation("Crosscheck persisted {Count} new matches", newMatches.Count);
+        }
+
+        // 4. Build the response with the details of the new matches.
+        var ourById = ourEvents.ToDictionary(e => e.EventUniqueId);
+        var response = new CrossCheckResponse
+        {
+            MuxoEventsScraped = scraped.Count,
+            MuxoEventsNew = newMuxoEvents.Count,
+            OurEventsAnalyzed = ourEvents.Count,
+            MatchesFound = newMatches.Count
+        };
+
+        foreach (var match in newMatches)
+        {
+            var muxoEvent = muxoIdByExternalId.Values.SingleOrDefault(m => m.Id == match.MuxoEventId);
+            response.Matches.Add(new CrossMatchDto
+            {
+                EventUniqueId = match.EventUniqueId,
+                EventTitle = ourById.GetValueOrDefault(match.EventUniqueId)?.Title,
+                MuxoTitle = muxoEvent?.Title,
+                MuxoDate = muxoEvent?.Date,
+                MuxoLink = muxoEvent?.Link,
+                Reason = match.Reason
+            });
+        }
+
+        return response;
     }
 
     public async Task<CleanupResponse> CleanupMonthAsync(
@@ -282,7 +431,8 @@ public class EventService : IEventService
             RecurrenceStartDate = r.RecurrenceStartDate,
             RecurrenceEndDate = r.RecurrenceEndDate,
             Account = r.Account,
-            Caption = r.Caption
+            Caption = r.Caption,
+            Url = r.Url
         };
 
     private static List<int>? ParseRecurrenceDays(string? days)
@@ -401,7 +551,7 @@ public class EventService : IEventService
     private static string? FormatRecurrenceDays(List<int>? days)
         => days is { Count: > 0 } ? string.Join(",", days) : null;
 
-    private static EventDetailResponse MapToDetailDto(EventRecord e)
+    private static EventDetailResponse MapToDetailDto(EventRecord e, CrossMatch? match = null)
     {
         return new EventDetailResponse
         {
@@ -421,7 +571,11 @@ public class EventService : IEventService
             PostDatetime = e.PostDatetime,
             Url = e.Url,
             ImageUrl = e.ImageUrl,
-            CreatedAt = e.CreatedAt
+            CreatedAt = e.CreatedAt,
+            IsCrossed = match != null,
+            MuxoTitle = match?.MuxoEvent?.Title,
+            MuxoLink = match?.MuxoEvent?.Link,
+            MuxoDate = match?.MuxoEvent?.Date
         };
     }
 }
