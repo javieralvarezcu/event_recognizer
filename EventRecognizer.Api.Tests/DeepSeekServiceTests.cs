@@ -442,9 +442,46 @@ public class DeepSeekServiceTests
         Assert.Contains("EVT-1", userPrompt);
         Assert.Contains("11", userPrompt);
         Assert.Contains("Círculo Juan 23", userPrompt);
+        // Our events must carry full context for the matching: summary, caption and
+        // a humanized recurrence line (the title alone is not enough).
+        Assert.Contains("resumen: Fiesta semanal", userPrompt);
+        Assert.Contains("caption: Todos los jueves fiesta", userPrompt);
+        Assert.Contains("recurrencia: (ninguna)", userPrompt);
+        Assert.Contains("enlace del post:", userPrompt);
 
         var systemPrompt = payload.Messages[0].Content;
         Assert.Contains("matches", systemPrompt);
         Assert.Contains("coincidencia SEGURA", systemPrompt);
+        Assert.Contains("NO exijas títulos idénticos", systemPrompt);
+    }
+
+    [Fact]
+    public async Task FindCrossMatchesAsync_FormatsWeeklyRecurrenceInSpanish()
+    {
+        _handler.Enqueue(HttpStatusCode.OK, TestData.BuildCrossMatchDeepSeekResponse(new List<CrossMatchResult>()));
+
+        var ourEvents = new List<CleanupEventItem>
+        {
+            new()
+            {
+                EventUniqueId = "EVT-1",
+                Title = "Jueves con G",
+                Summary = "Fiesta semanal",
+                IsRecurrent = true,
+                RecurrenceType = "weekly",
+                RecurrenceDaysOfWeek = "4",
+                RecurrenceStartDate = new DateTime(2026, 9, 10),
+                Account = "juevescong",
+                Url = "https://www.instagram.com/p/DQZPQ5zCJpa",
+                Caption = "Cada jueves la misma fórmula"
+            }
+        };
+
+        await _service.FindCrossMatchesAsync(ourEvents, CreateMuxoItems(), "key");
+
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(Assert.Single(_handler.RequestBodies)!)!;
+        var userPrompt = payload.Messages[1].Content;
+        Assert.Contains("recurrencia: semanal: jueves (desde 2026-09-10, sin fecha de fin)", userPrompt);
+        Assert.Contains("cuenta: juevescong", userPrompt);
     }
 }

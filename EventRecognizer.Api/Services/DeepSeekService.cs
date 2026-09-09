@@ -149,23 +149,32 @@ public class DeepSeekService : IDeepSeekService
         }
     }
 
+    private static readonly string[] SpanishDayNames =
+        { "lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo" };
+
     private static string BuildCrossMatchSystemPrompt()
     {
         return """
             Eres un asistente que cruza dos listas de eventos culturales de Córdoba para determinar cuáles se refieren al MISMO evento real.
 
             Recibirás:
-            1. NUESTROS EVENTOS: eventos detectados en posts de Instagram por un sistema de reconocimiento.
-            2. EVENTOS DE MUXOJALEO: eventos publicados en el calendario de muxojaleo.com.
+            1. NUESTROS EVENTOS: eventos detectados en posts de Instagram por un sistema de reconocimiento (título, resumen, fecha/recurrencia, cuenta, enlace del post y caption).
+            2. EVENTOS DE MUXOJALEO: eventos del calendario de muxojaleo.com (título, fecha concreta, lugar, categorías y enlace).
 
-            Tu tarea: devolver los pares (evento nuestro, evento de muxojaleo) que describen el mismo evento real.
+            Tu tarea: devolver TODOS los pares (evento nuestro, evento de muxojaleo) que describan el mismo evento real. El título es solo UNA pista más: usa TODAS las señales disponibles (fecha, lugar, cuenta, enlace, resumen, caption y categorías).
 
-            REGLAS DE COMPARACIÓN (MUY IMPORTANTE):
-            - NO te fíes solo del título: los títulos pueden variar entre ambas fuentes. Compara título, fecha (o patrón de recurrencia), lugar/espacio, cuenta y enlaces.
-            - Si el enlace de Instagram de NUESTRO evento coincide con el enlace del evento de muxojaleo, es una coincidencia SEGURA: empareja.
-            - Las fechas deben ser compatibles: mismo día, o el mismo patrón semanal en el mismo lugar.
-            - El mismo lugar/espacio (misma cuenta, misma sala) + título parecido + fecha compatible = mismo evento.
-            - Solo empareja cuando estés seguro. Ante la duda, NO emparejes.
+            CÓMO DECIDIR (de más fuerte a más débil):
+            - MISMO ENLACE: si el enlace de Instagram es idéntico en ambos, es el mismo evento (coincidencia SEGURA).
+            - Si el enlace del evento de muxojaleo apunta a un PERFIL de Instagram (por ejemplo https://www.instagram.com/juevescong, sin /p/), compáralo con la CUENTA de nuestro evento: misma cuenta = mismo organizador, casi seguro el mismo evento si además la fecha/temática encaja.
+            - MISMA FECHA + mismo lugar o cuenta (o temática claramente igual) = mismo evento aunque los títulos difieran.
+            - NUESTRO evento recurrente semanal ("todos los jueves"): se corresponde con el evento de muxojaleo cuyo día de la semana coincida con el patrón (p. ej. un jueves) y cuyo lugar/cuenta sea el mismo. La fecha concreta del evento de muxojaleo debe caer dentro del patrón semanal.
+            - Eventos de varios días nuestros ("diaria, del X al Y"): se corresponden con eventos de muxojaleo dentro de ese tramo con la misma temática/lugar.
+            - Los títulos pueden variar entre fuentes: busca palabras distintivas compartidas ("El Camino", "L0rna", "Azabache", "Cosmopoética") o el nombre del lugar/sala mencionado en el resumen o caption de nuestro evento que coincida con el lugar del evento de muxojaleo.
+            - Las categorías del evento de muxojaleo deben ser compatibles con la temática de nuestro evento (un concierto no se empareja con un taller de poesía).
+
+            NO exijas títulos idénticos. Si la fecha y el lugar/cuenta coinciden y la temática es la misma, empareja. Solo evita emparejar cuando las señales se contradigan claramente.
+
+            REGLAS DE FORMATO:
             - Cada evento puede aparecer como máximo en un par.
             - Solo puedes usar los IDs que aparecen en las listas. NUNCA inventes IDs.
 
@@ -194,13 +203,13 @@ public class DeepSeekService : IDeepSeekService
         {
             sb.AppendLine($"--- EVENTO (ID: {e.EventUniqueId}) ---");
             sb.AppendLine($"título: {TruncateForPrompt(e.Title, 200)}");
-            sb.AppendLine($"fecha: {(e.EventDate?.ToString("yyyy-MM-dd") ?? "(SIN FECHA)")}");
+            sb.AppendLine($"resumen: {TruncateForPrompt(e.Summary, 300)}");
+            sb.AppendLine($"fecha: {(e.EventDate?.ToString("yyyy-MM-dd") ?? "(sin fecha concreta)")}");
+            sb.AppendLine($"recurrencia: {FormatRecurrenceForPrompt(e)}");
             sb.AppendLine($"descripción de fecha: {TruncateForPrompt(e.EventDateDescription, 200)}");
-            sb.AppendLine($"recurrente: {e.IsRecurrent}");
-            sb.AppendLine($"tipo de recurrencia: {e.RecurrenceType ?? "(ninguno)"}");
-            sb.AppendLine($"días de la semana: {(string.IsNullOrWhiteSpace(e.RecurrenceDaysOfWeek) ? "(ninguno)" : e.RecurrenceDaysOfWeek)}");
             sb.AppendLine($"cuenta: {TruncateForPrompt(e.Account, 100)}");
-            sb.AppendLine($"enlace: {e.Url ?? "(ninguno)"}");
+            sb.AppendLine($"enlace del post: {e.Url ?? "(ninguno)"}");
+            sb.AppendLine($"caption: {TruncateForPrompt(e.Caption, 400)}");
         }
 
         sb.AppendLine();
@@ -217,6 +226,39 @@ public class DeepSeekService : IDeepSeekService
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>Humanizes the recurrence pattern for the cross-match prompt.</summary>
+    private static string FormatRecurrenceForPrompt(CleanupEventItem e)
+    {
+        if (!e.IsRecurrent)
+            return "(ninguna)";
+
+        var range = e.RecurrenceStartDate != null && e.RecurrenceEndDate != null
+            ? $" (del {e.RecurrenceStartDate:yyyy-MM-dd} al {e.RecurrenceEndDate:yyyy-MM-dd})"
+            : e.RecurrenceStartDate != null
+                ? $" (desde {e.RecurrenceStartDate:yyyy-MM-dd}, sin fecha de fin)"
+                : e.RecurrenceEndDate != null
+                    ? $" (hasta {e.RecurrenceEndDate:yyyy-MM-dd})"
+                    : string.Empty;
+
+        if (e.RecurrenceType == "weekly")
+        {
+            var days = (e.RecurrenceDaysOfWeek ?? string.Empty)
+                .Split(',')
+                .Select(s => int.TryParse(s.Trim(), out var n) ? n : 0)
+                .Where(n => n is >= 1 and <= 7)
+                .Select(n => SpanishDayNames[n - 1])
+                .ToList();
+            return days.Count > 0
+                ? $"semanal: {string.Join(", ", days)}{range}"
+                : $"semanal{range}";
+        }
+
+        if (e.RecurrenceType == "daily")
+            return $"diaria (evento de varios días){range}";
+
+        return $"sí{range}";
     }
 
     /// <summary>
