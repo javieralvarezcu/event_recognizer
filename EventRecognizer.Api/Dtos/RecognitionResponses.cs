@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace EventRecognizer.Api.Dtos;
 
 /// <summary>
@@ -127,6 +129,51 @@ public class MuxoEventDto
 
     /// <summary>Whether this muxo event is matched with one of our persisted events.</summary>
     public bool IsCrossed { get; set; }
+}
+
+/// <summary>
+/// Editable fields of one of our persisted events (PUT body). Full replacement of the
+/// editable fields: null clears the optional ones (except Url, which keeps the current
+/// value when null).
+/// </summary>
+public class UpdateEventRequest
+{
+    [Required]
+    [MaxLength(300)]
+    public string Title { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(2000)]
+    public string Summary { get; set; } = string.Empty;
+
+    public DateTime? EventDate { get; set; }
+
+    [MaxLength(500)]
+    public string? EventDateDescription { get; set; }
+
+    public bool IsRecurrent { get; set; }
+
+    /// <summary>"weekly" or "daily".</summary>
+    [MaxLength(20)]
+    public string? RecurrenceType { get; set; }
+
+    /// <summary>Comma-separated weekdays: 1 = Monday ... 7 = Sunday.</summary>
+    [MaxLength(50)]
+    public string? RecurrenceDaysOfWeek { get; set; }
+
+    public DateTime? RecurrenceStartDate { get; set; }
+
+    public DateTime? RecurrenceEndDate { get; set; }
+
+    /// <summary>Null keeps the current value (the column is NOT NULL).</summary>
+    [MaxLength(500)]
+    public string? Url { get; set; }
+
+    [MaxLength(1000)]
+    public string? ImageUrl { get; set; }
+
+    [MaxLength(4000)]
+    public string? Caption { get; set; }
 }
 
 public class ErrorResponse

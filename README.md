@@ -73,6 +73,8 @@ Cliente HTTP
     │  POST /api/events/recognize   (header: X-DeepSeek-API-Key)
     │  POST /api/events/cleanup     (header: X-DeepSeek-API-Key)
     │  POST /api/events/crosscheck  (header: X-DeepSeek-API-Key)
+    │  PUT  /api/events/{eventUniqueId}   (header: X-DeepSeek-API-Key)
+    │  DELETE /api/events/{eventUniqueId} (header: X-DeepSeek-API-Key)
     │  GET  /api/events
     │  GET  /api/events/{eventUniqueId}
     │  GET  /api/events/muxo
@@ -320,6 +322,41 @@ Recupera un evento previamente reconocido por su identificador único.
   "detail": "No event found with unique ID 'EVT-20260728-A1B2C3D4'."
 }
 ```
+
+---
+
+### `PUT /api/events/{eventUniqueId}`
+
+Edita los campos editables de uno de nuestros eventos (reemplazo completo de los campos editables; los campos opcionales en null se vacían, salvo `url` que conserva el valor actual si viene null). Devuelve el evento actualizado.
+
+**Headers requeridos:** `X-DeepSeek-API-Key` (igual que el resto de mutaciones).
+
+**Request body** (`application/json`):
+
+```json
+{
+  "title": "Saturno Club: 12 de septiembre",
+  "summary": "Fiesta en Sala Tempo",
+  "eventDate": "2026-09-12T00:00:00Z",
+  "eventDateDescription": "Sábado 12 de septiembre",
+  "isRecurrent": false,
+  "recurrenceType": null,
+  "recurrenceDaysOfWeek": null,
+  "recurrenceStartDate": null,
+  "recurrenceEndDate": null,
+  "url": "https://www.instagram.com/p/...",
+  "imageUrl": null,
+  "caption": "..."
+}
+```
+
+Códigos: `400` (título/resumen obligatorios o campos demasiado largos), `401`, `404`, `500`.
+
+---
+
+### `DELETE /api/events/{eventUniqueId}`
+
+Borra uno de nuestros eventos **y sus cruces con muxojaleo** (no deja `CrossMatches` huérfanos). Requiere el header `X-DeepSeek-API-Key`. Devuelve `204` si se borró, `404` si no existe, `401` sin key.
 
 ---
 
@@ -662,6 +699,7 @@ Características:
 - Botón **"Limpiar mes"**: envía los eventos del mes visible (más los sin fecha) al LLM para detectar y eliminar duplicados.
 - Botón **"Cruzar con muxojaleo"**: raspa muxojaleo.com, guarda sus eventos y los cruza con los nuestros mediante el LLM. Los eventos cruzados se pintan de **verde** y el check "Mostrar eventos cruzados" permite ocultarlos o mostrarlos; en el modal del evento aparece la entrada "En muxojaleo.com".
 - Los eventos de muxojaleo que **siguen sin cruzar** se muestran en el calendario en **morado**, con su propio check "Mostrar eventos de muxojaleo sin cruzar"; al hacer clic se abre un modal con su título, fecha, lugar, categorías y enlace.
+- El modal de **nuestros** eventos tiene botones **"Editar"** (formulario completo: título, resumen, fecha, recurrencia con días de la semana, URLs y caption) y **"Borrar"** (con confirmación en dos pasos). Ambos requieren la API key de DeepSeek (igual que el resto de mutaciones).
 - Ambas acciones requieren la API key de DeepSeek (se guarda en `localStorage` del navegador) y usan confirmación en dos pasos.
 - Sin autenticación (igual que los endpoints `GET`).
 
@@ -816,7 +854,7 @@ Ejemplo: `EVT-20260728-A1B2C3D4E5F6`
 
 La API **no** implementa autenticación de usuarios (JWT, OAuth, etc.). En su lugar:
 
-- Los endpoints `POST /api/events/recognize`, `POST /api/events/cleanup` y `POST /api/events/crosscheck` requieren que el **cliente** proporcione su propia API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
+- Todos los endpoints que mutan datos (`POST /api/events/recognize`, `POST /api/events/cleanup`, `POST /api/events/crosscheck`, `PUT /api/events/{eventUniqueId}` y `DELETE /api/events/{eventUniqueId}`) requieren que el **cliente** proporcione la API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
 - Los endpoints `GET /api/events` y `GET /api/events/{eventUniqueId}`, así como el panel web, son públicos.
 
 ### Secretos en el repositorio

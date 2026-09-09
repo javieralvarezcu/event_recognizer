@@ -168,6 +168,8 @@ public sealed class FakeEventService : IEventService
     private readonly Func<int, int, string, CancellationToken, Task<CleanupResponse>>? _cleanup;
     private readonly Func<string, CancellationToken, Task<CrossCheckResponse>>? _crossCheck;
     private readonly Func<CancellationToken, Task<List<MuxoEventDto>>>? _getAllMuxo;
+    private readonly Func<string, UpdateEventRequest, CancellationToken, Task<EventDetailResponse?>>? _updateEvent;
+    private readonly Func<string, CancellationToken, Task<bool>>? _deleteEvent;
 
     public FakeEventService(
         Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? recognize = null,
@@ -175,7 +177,9 @@ public sealed class FakeEventService : IEventService
         Func<CancellationToken, Task<List<EventDetailResponse>>>? getAll = null,
         Func<int, int, string, CancellationToken, Task<CleanupResponse>>? cleanup = null,
         Func<string, CancellationToken, Task<CrossCheckResponse>>? crossCheck = null,
-        Func<CancellationToken, Task<List<MuxoEventDto>>>? getAllMuxo = null)
+        Func<CancellationToken, Task<List<MuxoEventDto>>>? getAllMuxo = null,
+        Func<string, UpdateEventRequest, CancellationToken, Task<EventDetailResponse?>>? updateEvent = null,
+        Func<string, CancellationToken, Task<bool>>? deleteEvent = null)
     {
         _recognize = recognize;
         _getByUniqueId = getByUniqueId;
@@ -183,6 +187,8 @@ public sealed class FakeEventService : IEventService
         _cleanup = cleanup;
         _crossCheck = crossCheck;
         _getAllMuxo = getAllMuxo;
+        _updateEvent = updateEvent;
+        _deleteEvent = deleteEvent;
     }
 
     public DateRange? LastDateRange { get; private set; }
@@ -227,6 +233,19 @@ public sealed class FakeEventService : IEventService
         => _getAllMuxo != null
             ? _getAllMuxo(ct)
             : throw new InvalidOperationException("No getAllMuxo delegate configured.");
+
+    public Task<EventDetailResponse?> UpdateEventAsync(
+        string eventUniqueId,
+        UpdateEventRequest request,
+        CancellationToken ct = default)
+        => _updateEvent != null
+            ? _updateEvent(eventUniqueId, request, ct)
+            : throw new InvalidOperationException("No updateEvent delegate configured.");
+
+    public Task<bool> DeleteEventAsync(string eventUniqueId, CancellationToken ct = default)
+        => _deleteEvent != null
+            ? _deleteEvent(eventUniqueId, ct)
+            : throw new InvalidOperationException("No deleteEvent delegate configured.");
 }
 
 /// <summary>

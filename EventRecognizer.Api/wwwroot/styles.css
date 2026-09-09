@@ -207,6 +207,163 @@ main {
   font-weight: 600;
 }
 
+/* Acciones del modal: editar / borrar */
+#modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--fc-border-color);
+  padding-top: 1rem;
+}
+
+#modal-actions button {
+  border: none;
+  border-radius: 6px;
+  padding: 0.45rem 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#modal-edit {
+  background: var(--fc-button-bg-color);
+  color: #fff;
+}
+
+#modal-delete {
+  background: #b3261e;
+  color: #fff;
+}
+
+#modal-delete.confirm {
+  background: #d95c29;
+}
+
+#modal-action-error {
+  color: #b3261e;
+  font-size: 0.9rem;
+  flex-basis: 100%;
+}
+
+/* Overlay y formulario de edición */
+#edit-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 26, 38, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 1001;
+}
+
+#edit-modal {
+  position: relative;
+  background: #fff;
+  border-radius: 12px;
+  max-width: 560px;
+  width: 100%;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 1.5rem;
+}
+
+#edit-modal h2 {
+  margin: 0 0 1rem;
+  font-size: 1.25rem;
+}
+
+#edit-form label {
+  display: block;
+  margin-bottom: 0.7rem;
+  font-size: 0.92rem;
+  color: #1c2330;
+}
+
+#edit-form input,
+#edit-form textarea,
+#edit-form select {
+  display: block;
+  width: 100%;
+  margin-top: 0.2rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--fc-border-color);
+  border-radius: 6px;
+  font: inherit;
+}
+
+#edit-form label.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+#edit-form label.check input {
+  width: auto;
+  margin: 0;
+}
+
+#edit-days {
+  border: 1px solid var(--fc-border-color);
+  border-radius: 8px;
+  padding: 0.5rem 0.8rem;
+  margin: 0 0 0.7rem;
+}
+
+#edit-days legend {
+  font-size: 0.85rem;
+  color: #5b6472;
+}
+
+#edit-days .day-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0.25rem 0.75rem 0.25rem 0;
+  font-size: 0.9rem;
+}
+
+#edit-days .day-check input {
+  width: auto;
+  margin: 0;
+}
+
+#edit-error {
+  color: #b3261e;
+  font-size: 0.9rem;
+}
+
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.edit-actions button {
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#edit-cancel {
+  background: #e5e8ee;
+  color: #1c2330;
+}
+
+#edit-save {
+  background: var(--fc-button-bg-color);
+  color: #fff;
+}
+
+#edit-save:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 #calendar .fc-event {
   cursor: pointer;
   border-radius: 4px;

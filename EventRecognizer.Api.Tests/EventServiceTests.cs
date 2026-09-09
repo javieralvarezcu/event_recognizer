@@ -1,4 +1,5 @@
 using EventRecognizer.Api.Data;
+using EventRecognizer.Api.Dtos;
 using EventRecognizer.Api.Models;
 using EventRecognizer.Api.Services;
 using Microsoft.Data.Sqlite;
@@ -737,6 +738,117 @@ public class EventServiceTests
         var result = await service.GetMuxoEventsAsync();
 
         Assert.Empty(result);
+    }
+
+    [Fact]
+    public async Task UpdateEventAsync_UpdatesEditableFieldsAndReturnsDetail()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(TestData.CreateRecord("EVT-1", "Título antiguo", postId: "p1",
+            eventDate: new DateTime(2026, 9, 12)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var result = await service.UpdateEventAsync("EVT-1", new UpdateEventRequest
+        {
+            Title = "Saturno Club: 12 de septiembre",
+            Summary = "Nuevo resumen",
+            EventDate = new DateTime(2026, 9, 13),
+            EventDateDescription = "Sábado 13",
+            IsRecurrent = true,
+            RecurrenceType = "weekly",
+            RecurrenceDaysOfWeek = "6",
+            RecurrenceStartDate = new DateTime(2026, 9, 12),
+            RecurrenceEndDate = null,
+            Url = "https://instagram.com/p/nueva",
+            ImageUrl = null,
+            Caption = "Nuevo caption"
+        });
+
+        Assert.NotNull(result);
+        Assert.Equal("Saturno Club: 12 de septiembre", result.Title);
+        Assert.Equal("Nuevo resumen", result.Summary);
+        Assert.Equal(new DateTime(2026, 9, 13), result.EventDate);
+        Assert.Equal("Sábado 13", result.EventDateDescription);
+        Assert.True(result.IsRecurrent);
+        Assert.Equal("weekly", result.RecurrenceType);
+        Assert.Equal("6", result.RecurrenceDaysOfWeek);
+        Assert.Equal("https://instagram.com/p/nueva", result.Url);
+        Assert.Null(result.ImageUrl);
+
+        var stored = await fixture.Db.EventRecords.SingleAsync();
+        Assert.Equal("Saturno Club: 12 de septiembre", stored.Title);
+        Assert.Equal("Nuevo caption", stored.Caption);
+        Assert.Null(stored.RecurrenceEndDate);
+    }
+
+    [Fact]
+    public async Task UpdateEventAsync_WithNullUrl_KeepsExistingUrl()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(TestData.CreateRecord("EVT-1", "Evento", postId: "p1"));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var result = await service.UpdateEventAsync("EVT-1", new UpdateEventRequest
+        {
+            Title = "Evento",
+            Summary = "Resumen",
+            Url = null
+        });
+
+        Assert.NotNull(result);
+        Assert.Equal("https://instagram.com/p/p1", result.Url);
+    }
+
+    [Fact]
+    public async Task UpdateEventAsync_WhenNotFound_ReturnsNull()
+    {
+        using var fixture = new TestDatabase();
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var result = await service.UpdateEventAsync("EVT-missing", new UpdateEventRequest
+        {
+            Title = "X",
+            Summary = "Y"
+        });
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task DeleteEventAsync_DeletesEventAndItsCrossMatches()
+    {
+        using var fixture = new TestDatabase();
+        var ourEvent = TestData.CreateRecord("EVT-1", "Evento", postId: "p1");
+        var muxoEvent = TestData.CreateMuxoEvent("4", "Muxo");
+        fixture.Db.EventRecords.Add(ourEvent);
+        fixture.Db.MuxoEvents.Add(muxoEvent);
+        await fixture.Db.SaveChangesAsync();
+        fixture.Db.CrossMatches.Add(new CrossMatch { EventUniqueId = "EVT-1", MuxoEventId = muxoEvent.Id });
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var deleted = await service.DeleteEventAsync("EVT-1");
+
+        Assert.True(deleted);
+        Assert.Equal(0, await fixture.Db.EventRecords.CountAsync());
+        Assert.Equal(0, await fixture.Db.CrossMatches.CountAsync());
+        Assert.Equal(1, await fixture.Db.MuxoEvents.CountAsync()); // el muxo se queda
+    }
+
+    [Fact]
+    public async Task DeleteEventAsync_WhenNotFound_ReturnsFalse()
+    {
+        using var fixture = new TestDatabase();
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>());
+
+        var deleted = await service.DeleteEventAsync("EVT-missing");
+
+        Assert.False(deleted);
     }
 
     [Fact]

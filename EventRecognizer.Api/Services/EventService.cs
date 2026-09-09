@@ -184,6 +184,62 @@ public class EventService : IEventService
         return records.Select(r => MapToDetailDto(r, matches.GetValueOrDefault(r.EventUniqueId))).ToList();
     }
 
+    public async Task<EventDetailResponse?> UpdateEventAsync(
+        string eventUniqueId,
+        UpdateEventRequest request,
+        CancellationToken ct = default)
+    {
+        var record = await _dbContext.EventRecords
+            .FirstOrDefaultAsync(e => e.EventUniqueId == eventUniqueId, ct);
+        if (record == null)
+            return null;
+
+        record.Title = request.Title.Trim();
+        record.Summary = request.Summary.Trim();
+        record.EventDate = request.EventDate;
+        record.EventDateDescription = NullIfWhitespace(request.EventDateDescription);
+        record.IsRecurrent = request.IsRecurrent;
+        record.RecurrenceType = NullIfWhitespace(request.RecurrenceType);
+        record.RecurrenceDaysOfWeek = NullIfWhitespace(request.RecurrenceDaysOfWeek);
+        record.RecurrenceStartDate = request.RecurrenceStartDate;
+        record.RecurrenceEndDate = request.RecurrenceEndDate;
+        record.Url = NullIfWhitespace(request.Url) ?? record.Url;
+        record.ImageUrl = NullIfWhitespace(request.ImageUrl);
+        record.Caption = request.Caption ?? string.Empty;
+
+        await _dbContext.SaveChangesAsync(ct);
+        _logger.LogInformation("Updated event {EventUniqueId}", eventUniqueId);
+
+        var match = await _dbContext.CrossMatches
+            .Include(m => m.MuxoEvent)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(m => m.EventUniqueId == eventUniqueId, ct);
+
+        return MapToDetailDto(record, match);
+    }
+
+    public async Task<bool> DeleteEventAsync(string eventUniqueId, CancellationToken ct = default)
+    {
+        var record = await _dbContext.EventRecords
+            .FirstOrDefaultAsync(e => e.EventUniqueId == eventUniqueId, ct);
+        if (record == null)
+            return false;
+
+        // Cross-matches referencing the event must not stay behind as stale rows.
+        var matches = await _dbContext.CrossMatches
+            .Where(m => m.EventUniqueId == eventUniqueId)
+            .ToListAsync(ct);
+        _dbContext.CrossMatches.RemoveRange(matches);
+        _dbContext.EventRecords.Remove(record);
+
+        await _dbContext.SaveChangesAsync(ct);
+        _logger.LogInformation("Deleted event {EventUniqueId} ({Title})", eventUniqueId, record.Title);
+        return true;
+    }
+
+    private static string? NullIfWhitespace(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value;
+
     public async Task<List<MuxoEventDto>> GetMuxoEventsAsync(CancellationToken ct = default)
     {
         var muxoEvents = await _dbContext.MuxoEvents

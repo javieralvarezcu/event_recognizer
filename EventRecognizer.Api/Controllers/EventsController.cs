@@ -276,6 +276,94 @@ public class EventsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Updates the editable fields of one of our persisted events.
+    /// </summary>
+    /// <remarks>Requires the header <c>X-DeepSeek-API-Key</c> with a valid DeepSeek API token.</remarks>
+    [HttpPut("{eventUniqueId}")]
+    [ProducesResponseType(typeof(EventDetailResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> UpdateEvent(
+        string eventUniqueId,
+        [FromBody] UpdateEventRequest request,
+        CancellationToken ct)
+    {
+        var deepSeekApiKey = Request.Headers[DeepSeekApiKeyHeader].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(deepSeekApiKey))
+        {
+            return MissingApiKey();
+        }
+
+        try
+        {
+            var updated = await _eventService.UpdateEventAsync(eventUniqueId, request, ct);
+            if (updated == null)
+            {
+                return NotFound(new ErrorResponse
+                {
+                    Error = "Event not found",
+                    Detail = $"No event found with unique ID '{eventUniqueId}'."
+                });
+            }
+
+            return Ok(updated);
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Failed to save the updated event to the database");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to save events to the database",
+                Detail = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// Deletes one of our persisted events (and its cross-matches).
+    /// </summary>
+    /// <remarks>Requires the header <c>X-DeepSeek-API-Key</c> with a valid DeepSeek API token.</remarks>
+    [HttpDelete("{eventUniqueId}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> DeleteEvent(string eventUniqueId, CancellationToken ct)
+    {
+        var deepSeekApiKey = Request.Headers[DeepSeekApiKeyHeader].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(deepSeekApiKey))
+        {
+            return MissingApiKey();
+        }
+
+        try
+        {
+            var deleted = await _eventService.DeleteEventAsync(eventUniqueId, ct);
+            if (!deleted)
+            {
+                return NotFound(new ErrorResponse
+                {
+                    Error = "Event not found",
+                    Detail = $"No event found with unique ID '{eventUniqueId}'."
+                });
+            }
+
+            return NoContent();
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Failed to delete the event from the database");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to save events to the database",
+                Detail = ex.Message
+            });
+        }
+    }
+
     private UnauthorizedObjectResult MissingApiKey()
         => Unauthorized(new ErrorResponse
         {

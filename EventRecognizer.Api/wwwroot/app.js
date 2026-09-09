@@ -112,7 +112,11 @@ function formatRecurrence(e) {
   return 'No es recurrente';
 }
 
+/** Evento nuestro que se está viendo en el modal (null para los de muxojaleo). */
+let currentModalEvent = null;
+
 function openModal(e) {
+  currentModalEvent = e;
   $('modal-title').textContent = e.title || 'Sin título';
   $('modal-summary').textContent = e.summary || '—';
   $('modal-date-description').textContent = e.eventDateDescription || '—';
@@ -152,6 +156,8 @@ function openModal(e) {
   $('modal-caption').textContent = e.caption || '';
   $('modal-caption-title').classList.remove('hidden');
   $('modal-caption').classList.remove('hidden');
+  $('modal-actions').classList.remove('hidden');
+  hideModalActionError();
 
   // Fila "En muxojaleo.com": solo visible cuando el evento está cruzado.
   const muxoLabel = $('modal-muxo-label');
@@ -172,6 +178,7 @@ function openModal(e) {
 
 /** Modal para un evento que solo existe en muxojaleo.com (sin cruzar). */
 function openMuxoModal(m) {
+  currentModalEvent = null;
   $('modal-title').textContent = m.title || 'Sin título';
   $('modal-summary').textContent = [m.categories, m.price].filter(Boolean).join(' · ') || '—';
 
@@ -197,12 +204,14 @@ function openMuxoModal(m) {
   $('modal-muxo').classList.add('hidden');
   $('modal-caption-title').classList.add('hidden');
   $('modal-caption').classList.add('hidden');
+  $('modal-actions').classList.add('hidden'); // los eventos muxo no se editan ni borran
 
   $('modal-overlay').classList.remove('hidden');
 }
 
 function closeModal() {
   $('modal-overlay').classList.add('hidden');
+  disarmDelete();
 }
 
 function renderNoDateList(events) {
@@ -586,5 +595,201 @@ async function runCrossCheck() {
 }
 
 crosscheckButton.addEventListener('click', runCrossCheck);
+
+// --- Editar y borrar nuestros eventos ---
+const daysContainer = $('edit-days');
+const modalActionError = $('modal-action-error');
+
+// Checkboxes de los días de la semana (1 = lunes ... 7 = domingo).
+DAY_NAMES.forEach((name, index) => {
+  const label = document.createElement('label');
+  label.className = 'day-check';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.value = String(index + 1);
+  label.append(input, document.createTextNode(' ' + name));
+  daysContainer.appendChild(label);
+});
+
+function showModalActionError(message) {
+  modalActionError.textContent = message;
+  modalActionError.classList.remove('hidden');
+}
+
+function hideModalActionError() {
+  modalActionError.classList.add('hidden');
+}
+
+function showEditError(message) {
+  $('edit-error').textContent = message;
+  $('edit-error').classList.remove('hidden');
+}
+
+function hideEditError() {
+  $('edit-error').classList.add('hidden');
+}
+
+function closeEditForm() {
+  $('edit-overlay').classList.add('hidden');
+}
+
+function toggleRecurrenceFields() {
+  $('edit-recurrence-fields').classList.toggle('hidden', !$('edit-recurrent').checked);
+}
+
+function openEditForm() {
+  const e = currentModalEvent;
+  if (!e) return;
+
+  $('edit-title').value = e.title || '';
+  $('edit-summary').value = e.summary || '';
+  $('edit-date').value = toDateOnly(e.eventDate) || '';
+  $('edit-date-description').value = e.eventDateDescription || '';
+  $('edit-recurrent').checked = !!e.isRecurrent;
+  $('edit-recurrence-type').value = e.recurrenceType === 'daily' ? 'daily' : 'weekly';
+  const days = (e.recurrenceDaysOfWeek || '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (const input of daysContainer.querySelectorAll('input')) {
+    input.checked = days.includes(input.value);
+  }
+  $('edit-recurrence-start').value = toDateOnly(e.recurrenceStartDate) || '';
+  $('edit-recurrence-end').value = toDateOnly(e.recurrenceEndDate) || '';
+  $('edit-url').value = e.url || '';
+  $('edit-image-url').value = e.imageUrl || '';
+  $('edit-caption').value = e.caption || '';
+  toggleRecurrenceFields();
+  hideEditError();
+  $('edit-overlay').classList.remove('hidden');
+}
+
+$('modal-edit').addEventListener('click', openEditForm);
+$('edit-recurrent').addEventListener('change', toggleRecurrenceFields);
+$('edit-cancel').addEventListener('click', closeEditForm);
+$('edit-overlay').addEventListener('click', (event) => {
+  if (event.target === $('edit-overlay')) closeEditForm();
+});
+
+$('edit-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const e = currentModalEvent;
+  if (!e) return;
+
+  const key = cleanupKeyInput.value.trim();
+  if (!key) {
+    cleanupKeyInput.focus();
+    showEditError('Introduce tu API key de DeepSeek para poder editar.');
+    return;
+  }
+
+  // La edición solo cambia el DÍA: se conserva la hora original del evento.
+  const dateStr = $('edit-date').value;
+  const timePart = e.eventDate ? String(e.eventDate).slice(11, 19) : '00:00:00';
+  const days = [...daysContainer.querySelectorAll('input:checked')]
+    .map((input) => Number(input.value))
+    .sort((a, b) => a - b);
+  const startStr = $('edit-recurrence-start').value;
+  const endStr = $('edit-recurrence-end').value;
+  const isRecurrent = $('edit-recurrent').checked;
+
+  const payload = {
+    title: $('edit-title').value.trim(),
+    summary: $('edit-summary').value.trim(),
+    eventDate: dateStr ? `${dateStr}T${timePart}Z` : null,
+    eventDateDescription: $('edit-date-description').value.trim() || null,
+    isRecurrent,
+    recurrenceType: isRecurrent ? $('edit-recurrence-type').value : null,
+    recurrenceDaysOfWeek: isRecurrent && days.length > 0 ? days.join(',') : null,
+    recurrenceStartDate: startStr ? `${startStr}T00:00:00Z` : null,
+    recurrenceEndDate: endStr ? `${endStr}T00:00:00Z` : null,
+    url: $('edit-url').value.trim() || null,
+    imageUrl: $('edit-image-url').value.trim() || null,
+    caption: $('edit-caption').value || null
+  };
+
+  $('edit-save').disabled = true;
+  try {
+    const res = await fetch(`/api/events/${encodeURIComponent(e.eventUniqueId)}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-DeepSeek-API-Key': key
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const err = await res.json();
+        detail = err.detail || err.title || err.error || detail;
+      } catch {
+        /* respuesta sin JSON */
+      }
+      showEditError(`No se pudo guardar: ${detail}`);
+      return;
+    }
+
+    closeEditForm();
+    closeModal();
+    await init(); // refresca el calendario con los datos editados
+  } catch {
+    showEditError('No se pudo contactar con la API.');
+  } finally {
+    $('edit-save').disabled = false;
+  }
+});
+
+// Borrado con confirmación en dos pasos (mismo patrón que los otros botones).
+let deleteTimer = null;
+
+function disarmDelete() {
+  clearTimeout(deleteTimer);
+  $('modal-delete').dataset.confirm = 'false';
+  $('modal-delete').classList.remove('confirm');
+  $('modal-delete').textContent = 'Borrar';
+}
+
+$('modal-delete').addEventListener('click', async () => {
+  const e = currentModalEvent;
+  if (!e) return;
+
+  if ($('modal-delete').dataset.confirm !== 'true') {
+    $('modal-delete').dataset.confirm = 'true';
+    $('modal-delete').classList.add('confirm');
+    $('modal-delete').textContent = '¿Seguro? Pulsa de nuevo';
+    hideModalActionError();
+    deleteTimer = setTimeout(disarmDelete, 8000);
+    return;
+  }
+
+  disarmDelete();
+  const key = cleanupKeyInput.value.trim();
+  if (!key) {
+    cleanupKeyInput.focus();
+    showModalActionError('Introduce tu API key de DeepSeek para poder borrar.');
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/events/${encodeURIComponent(e.eventUniqueId)}`, {
+      method: 'DELETE',
+      headers: { 'X-DeepSeek-API-Key': key }
+    });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const err = await res.json();
+        detail = err.detail || err.error || detail;
+      } catch {
+        /* respuesta sin JSON */
+      }
+      showModalActionError(`No se pudo borrar: ${detail}`);
+      return;
+    }
+
+    closeModal();
+    await init();
+  } catch {
+    showModalActionError('No se pudo contactar con la API.');
+  }
+});
 
 init();

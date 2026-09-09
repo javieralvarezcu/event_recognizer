@@ -62,4 +62,19 @@ public interface IEventService
     /// is already crossed with one of our events.
     /// </summary>
     Task<List<MuxoEventDto>> GetMuxoEventsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Updates the editable fields of one of our persisted events and returns the
+    /// updated event, or null when it does not exist.
+    /// </summary>
+    Task<EventDetailResponse?> UpdateEventAsync(
+        string eventUniqueId,
+        UpdateEventRequest request,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes one of our persisted events (and its cross-matches). Returns false when
+    /// the event does not exist.
+    /// </summary>
+    Task<bool> DeleteEventAsync(string eventUniqueId, CancellationToken ct = default);
 }

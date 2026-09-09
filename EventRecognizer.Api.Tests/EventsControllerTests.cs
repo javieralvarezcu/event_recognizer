@@ -349,6 +349,98 @@ public class EventsControllerTests
     }
 
     [Fact]
+    public async Task UpdateEvent_WithMissingApiKey_Returns401()
+    {
+        var controller = CreateController(new FakeEventService());
+
+        var result = await controller.UpdateEvent("EVT-1",
+            new UpdateEventRequest { Title = "X", Summary = "Y" }, CancellationToken.None);
+
+        var unauthorized = Assert.IsType<UnauthorizedObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(unauthorized.Value);
+        Assert.Equal("Missing API key", error.Error);
+    }
+
+    [Fact]
+    public async Task UpdateEvent_WhenNotFound_Returns404()
+    {
+        var service = new FakeEventService(updateEvent: (_, _, _) => Task.FromResult<EventDetailResponse?>(null));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.UpdateEvent("EVT-missing",
+            new UpdateEventRequest { Title = "X", Summary = "Y" }, CancellationToken.None);
+
+        var notFound = Assert.IsType<NotFoundObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(notFound.Value);
+        Assert.Equal("Event not found", error.Error);
+    }
+
+    [Fact]
+    public async Task UpdateEvent_WithValidInput_ReturnsOkWithUpdatedEvent()
+    {
+        string? receivedId = null;
+        UpdateEventRequest? receivedRequest = null;
+        var detail = new EventDetailResponse { EventUniqueId = "EVT-1", Title = "Nuevo" };
+        var service = new FakeEventService(updateEvent: (id, request, _) =>
+        {
+            receivedId = id;
+            receivedRequest = request;
+            return Task.FromResult<EventDetailResponse?>(detail);
+        });
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+        var request = new UpdateEventRequest { Title = "Nuevo", Summary = "Resumen" };
+
+        var result = await controller.UpdateEvent("EVT-1", request, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Same(detail, ok.Value);
+        Assert.Equal("EVT-1", receivedId);
+        Assert.Same(request, receivedRequest);
+    }
+
+    [Fact]
+    public async Task DeleteEvent_WithMissingApiKey_Returns401()
+    {
+        var controller = CreateController(new FakeEventService());
+
+        var result = await controller.DeleteEvent("EVT-1", CancellationToken.None);
+
+        var unauthorized = Assert.IsType<UnauthorizedObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(unauthorized.Value);
+        Assert.Equal("Missing API key", error.Error);
+    }
+
+    [Fact]
+    public async Task DeleteEvent_WhenNotFound_Returns404()
+    {
+        var service = new FakeEventService(deleteEvent: (_, _) => Task.FromResult(false));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.DeleteEvent("EVT-missing", CancellationToken.None);
+
+        var notFound = Assert.IsType<NotFoundObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(notFound.Value);
+        Assert.Equal("Event not found", error.Error);
+    }
+
+    [Fact]
+    public async Task DeleteEvent_WhenDeleted_Returns204()
+    {
+        string? receivedId = null;
+        var service = new FakeEventService(deleteEvent: (id, _) =>
+        {
+            receivedId = id;
+            return Task.FromResult(true);
+        });
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.DeleteEvent("EVT-1", CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        Assert.Equal("EVT-1", receivedId);
+    }
+
+    [Fact]
     public async Task CrossCheck_WithMissingApiKey_Returns401()
     {
         var controller = CreateController(new FakeEventService());

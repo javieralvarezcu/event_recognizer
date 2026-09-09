@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Calendario de eventos</title>
-  <link rel="stylesheet" href="/styles.css?v=4">
+  <link rel="stylesheet" href="/styles.css?v=6">
 </head>
 <body>
   <header>
@@ -104,12 +104,72 @@
       </dl>
       <h3 id="modal-caption-title">Texto del post</h3>
       <p id="modal-caption" class="caption"></p>
+      <div id="modal-actions">
+        <button id="modal-edit" type="button">Editar</button>
+        <button id="modal-delete" type="button">Borrar</button>
+        <span id="modal-action-error" class="hidden"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Formulario de edición -->
+  <div id="edit-overlay" class="hidden">
+    <div id="edit-modal" role="dialog" aria-modal="true" aria-labelledby="edit-heading">
+      <h2 id="edit-heading">Editar evento</h2>
+      <form id="edit-form">
+        <label>Título
+          <input id="edit-title" required maxlength="300">
+        </label>
+        <label>Resumen
+          <textarea id="edit-summary" rows="3" required maxlength="2000"></textarea>
+        </label>
+        <label>Fecha
+          <input id="edit-date" type="date">
+        </label>
+        <label>Descripción de la fecha
+          <input id="edit-date-description" maxlength="500">
+        </label>
+        <label class="check">
+          <input type="checkbox" id="edit-recurrent"> Recurrente
+        </label>
+        <div id="edit-recurrence-fields" class="hidden">
+          <label>Tipo de recurrencia
+            <select id="edit-recurrence-type">
+              <option value="weekly">Semanal (días de la semana)</option>
+              <option value="daily">Diaria (varios días seguidos)</option>
+            </select>
+          </label>
+          <fieldset id="edit-days">
+            <legend>Días de la semana</legend>
+          </fieldset>
+          <label>Inicio de la recurrencia
+            <input id="edit-recurrence-start" type="date">
+          </label>
+          <label>Fin de la recurrencia (vacío = sin fin)
+            <input id="edit-recurrence-end" type="date">
+          </label>
+        </div>
+        <label>URL del post
+          <input id="edit-url" maxlength="500">
+        </label>
+        <label>URL de la imagen
+          <input id="edit-image-url" maxlength="1000">
+        </label>
+        <label>Caption
+          <textarea id="edit-caption" rows="3" maxlength="4000"></textarea>
+        </label>
+        <p id="edit-error" class="hidden"></p>
+        <div class="edit-actions">
+          <button type="button" id="edit-cancel">Cancelar</button>
+          <button type="submit" id="edit-save">Guardar</button>
+        </div>
+      </form>
     </div>
   </div>
 
   <!-- FullCalendar v6 (CDN, requiere acceso a Internet) -->
   <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@fullcalendar/core@6.1.15/locales/es.global.min.js"></script>
-  <script src="/app.js?v=5"></script>
+  <script src="/app.js?v=6"></script>
 </body>
 </html>
