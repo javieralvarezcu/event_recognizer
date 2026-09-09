@@ -253,7 +253,23 @@ const cleanupKeyInput = $('cleanup-key');
 const cleanupButton = $('cleanup-button');
 const cleanupResult = $('cleanup-result');
 
-cleanupKeyInput.value = localStorage.getItem('deepseekApiKey') || '';
+// localStorage puede lanzar si el navegador bloquea el almacenamiento: nunca debe
+// impedir que el resto del panel funcione.
+cleanupKeyInput.value = (() => {
+  try {
+    return localStorage.getItem('deepseekApiKey') || '';
+  } catch {
+    return '';
+  }
+})();
+
+function storeCleanupKey(key) {
+  try {
+    localStorage.setItem('deepseekApiKey', key);
+  } catch {
+    /* sin almacenamiento disponible: el usuario tendrá que volver a escribirla */
+  }
+}
 
 function showCleanupResult(kind, title, lines) {
   cleanupResult.replaceChildren();
@@ -272,6 +288,18 @@ function showCleanupResult(kind, title, lines) {
   }
 }
 
+// Confirmación en dos pasos dentro de la página (sin confirm() del navegador, que
+// algunos navegadores/iframes bloquean silenciosamente): primer clic arma el botón,
+// segundo clic ejecuta. Se desarma solo a los pocos segundos.
+let confirmTimer = null;
+
+function disarmCleanup() {
+  clearTimeout(confirmTimer);
+  cleanupButton.dataset.confirm = 'false';
+  cleanupButton.classList.remove('confirm');
+  cleanupButton.textContent = 'Limpiar mes';
+}
+
 async function runCleanup() {
   const key = cleanupKeyInput.value.trim();
   if (!key) {
@@ -279,8 +307,6 @@ async function runCleanup() {
     showCleanupResult('error', 'Introduce tu API key de DeepSeek para poder limpiar el mes.');
     return;
   }
-  localStorage.setItem('deepseekApiKey', key);
-
   if (!currentMonth) {
     showCleanupResult('error', 'No se pudo determinar el mes visible del calendario.');
     return;
@@ -288,12 +314,22 @@ async function runCleanup() {
 
   const [year, month] = currentMonth.split('-').map(Number);
   const monthName = new Date(year, month - 1, 1).toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
-  if (!confirm(
-    `¿Limpiar ${monthName}? Se enviarán los eventos de ese mes (y los eventos sin fecha) al LLM, ` +
-    'que decidirá cuáles son duplicados y los eliminará conservando uno por evento.')) {
+
+  if (cleanupButton.dataset.confirm !== 'true') {
+    // Primer clic: pedir confirmación explícita.
+    storeCleanupKey(key);
+    cleanupButton.dataset.confirm = 'true';
+    cleanupButton.classList.add('confirm');
+    cleanupButton.textContent = '¿Seguro? Pulsa de nuevo';
+    showCleanupResult('ok',
+      `Se analizará ${monthName} (más los eventos sin fecha) y se eliminarán los duplicados. ` +
+      'Pulsa otra vez el botón para confirmar.');
+    clearTimeout(confirmTimer);
+    confirmTimer = setTimeout(disarmCleanup, 8000);
     return;
   }
 
+  disarmCleanup();
   cleanupButton.disabled = true;
   cleanupButton.textContent = 'Analizando…';
   showCleanupResult('ok', 'Analizando con el LLM…');
