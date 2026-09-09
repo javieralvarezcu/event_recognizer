@@ -519,6 +519,64 @@ public class EventServiceTests
     }
 
     [Fact]
+    public async Task CleanupMonthAsync_AlsoDeletesCrossMatchesOfRemovedEvents()
+    {
+        using var fixture = new TestDatabase();
+        var kept = TestData.CreateRecord("EVT-keep", "Saturno 12 de septiembre", postId: "p1",
+            eventDate: new DateTime(2026, 9, 12));
+        var duplicate = TestData.CreateRecord("EVT-dupe", "Saturno Club: El Virtual", postId: "p2");
+        var muxoEvent = TestData.CreateMuxoEvent("4", "Saturno - El Virtual HYBRID SET");
+        fixture.Db.EventRecords.AddRange(kept, duplicate);
+        fixture.Db.MuxoEvents.Add(muxoEvent);
+        await fixture.Db.SaveChangesAsync();
+        fixture.Db.CrossMatches.Add(new CrossMatch { EventUniqueId = "EVT-dupe", MuxoEventId = muxoEvent.Id });
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            findDuplicates: (_, _) => new List<DuplicateGroupResult>
+            {
+                new() { KeepEventId = "EVT-keep", DuplicateEventIds = new List<string> { "EVT-dupe" } }
+            });
+
+        var response = await service.CleanupMonthAsync(2026, 9, "key");
+
+        Assert.Equal(1, response.DeletedCount);
+        Assert.Null(await fixture.Db.EventRecords.FirstOrDefaultAsync(r => r.EventUniqueId == "EVT-dupe"));
+        // The cross-match of the deleted event must not stay behind as a stale row.
+        Assert.Empty(await fixture.Db.CrossMatches.ToListAsync());
+    }
+
+    [Fact]
+    public async Task CrossCheckAsync_RemovesStaleMatchesAndAllowsRematching()
+    {
+        using var fixture = new TestDatabase();
+        var ourEvent = TestData.CreateRecord("EVT-keep", "Saturno 12 de septiembre", postId: "p1",
+            eventDate: new DateTime(2026, 9, 12));
+        var muxoEvent = TestData.CreateMuxoEvent("4", "Saturno - El Virtual HYBRID SET", new DateTime(2026, 9, 12));
+        fixture.Db.EventRecords.Add(ourEvent);
+        fixture.Db.MuxoEvents.Add(muxoEvent);
+        await fixture.Db.SaveChangesAsync();
+        // Stale match: references an event that no longer exists.
+        fixture.Db.CrossMatches.Add(new CrossMatch { EventUniqueId = "EVT-GHOST", MuxoEventId = muxoEvent.Id });
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>(),
+            scrape: _ => new List<MuxoEvent> { muxoEvent },
+            findCrossMatches: (_, _) => new List<CrossMatchResult>
+            {
+                new() { EventUniqueId = "EVT-keep", MuxoEventId = "4", Reason = "Misma fecha" }
+            });
+
+        var response = await service.CrossCheckAsync("key");
+
+        // The stale row is removed and the surviving event can be matched with the muxo event.
+        Assert.Equal(1, response.MatchesFound);
+        var match = await fixture.Db.CrossMatches.SingleAsync();
+        Assert.Equal("EVT-keep", match.EventUniqueId);
+        Assert.Equal(muxoEvent.Id, match.MuxoEventId);
+    }
+
+    [Fact]
     public async Task CrossCheckAsync_ScrapesAndPersistsMuxoEventsDeduplicatedByExternalId()
     {
         using var fixture = new TestDatabase();

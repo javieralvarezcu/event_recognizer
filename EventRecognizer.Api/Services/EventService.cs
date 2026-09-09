@@ -276,15 +276,28 @@ public class EventService : IEventService
 
         // 3. Persist only new, valid matches (both ids must exist and the pair must not
         //    be persisted yet; each event and each muxo event matches at most once).
+        //    Matches whose event was deleted since (e.g. by a cleanup) are stale: remove
+        //    them so those muxo events can be matched again with the surviving event.
         var validOurIds = ourEvents.Select(e => e.EventUniqueId).ToHashSet();
         var muxoIdByExternalId = muxoEvents.ToDictionary(m => m.ExternalId);
-        var existingPairs = await _dbContext.CrossMatches
-            .AsNoTracking()
-            .Select(m => new { m.EventUniqueId, m.MuxoEventId })
-            .ToListAsync(ct);
+        var existingMatches = await _dbContext.CrossMatches.ToListAsync(ct);
 
-        var usedMuxoIds = existingPairs.Select(p => p.MuxoEventId).ToHashSet();
-        var usedEventIds = existingPairs.Select(p => p.EventUniqueId).ToHashSet();
+        var staleMatches = existingMatches.Where(m => !validOurIds.Contains(m.EventUniqueId)).ToList();
+        if (staleMatches.Count > 0)
+        {
+            _dbContext.CrossMatches.RemoveRange(staleMatches);
+            await _dbContext.SaveChangesAsync(ct);
+            _logger.LogInformation("Crosscheck removed {Count} stale matches", staleMatches.Count);
+        }
+
+        var usedMuxoIds = existingMatches
+            .Where(m => validOurIds.Contains(m.EventUniqueId))
+            .Select(m => m.MuxoEventId)
+            .ToHashSet();
+        var usedEventIds = existingMatches
+            .Where(m => validOurIds.Contains(m.EventUniqueId))
+            .Select(m => m.EventUniqueId)
+            .ToHashSet();
 
         var newMatches = new List<CrossMatch>();
         foreach (var pair in matches)
@@ -386,6 +399,15 @@ public class EventService : IEventService
                 .Where(e => toDelete.Contains(e.EventUniqueId))
                 .ToListAsync(ct);
             _dbContext.EventRecords.RemoveRange(entities);
+
+            // Cross-matches referencing the removed events would become stale: delete
+            // them too, so those muxo events can be matched again on the next crosscheck.
+            var deletedIds = entities.Select(e => e.EventUniqueId).ToList();
+            var staleMatches = await _dbContext.CrossMatches
+                .Where(m => deletedIds.Contains(m.EventUniqueId))
+                .ToListAsync(ct);
+            _dbContext.CrossMatches.RemoveRange(staleMatches);
+
             await _dbContext.SaveChangesAsync(ct);
             _logger.LogInformation(
                 "Cleanup removed {Count} duplicate events for month {Month}", entities.Count, monthLabel);
