@@ -17,6 +17,8 @@ public class AppDbContext : DbContext
 
     public DbSet<DeepSeekCallLog> DeepSeekCallLogs => Set<DeepSeekCallLog>();
 
+    public DbSet<PostAnalysisCache> PostAnalysisCaches => Set<PostAnalysisCache>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<EventRecord>(entity =>
@@ -59,6 +61,12 @@ public class AppDbContext : DbContext
             entity.HasIndex(e => e.StartedAtUtc);
 
             entity.HasIndex(e => e.Operation);
+        });
+
+        modelBuilder.Entity<PostAnalysisCache>(entity =>
+        {
+            entity.HasIndex(e => e.PostHash)
+                  .IsUnique();
         });
     }
 }

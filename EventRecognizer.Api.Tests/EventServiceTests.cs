@@ -16,10 +16,12 @@ public class EventServiceTests
         Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null,
         Func<int, List<MuxoEvent>>? scrape = null,
         Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? findCrossMatches = null,
-        Func<List<CleanupEventItem>, List<CleanupEventItem>, List<DuplicateGroupResult>>? findDuplicateCandidates = null)
+        Func<List<CleanupEventItem>, List<CleanupEventItem>, List<DuplicateGroupResult>>? findDuplicateCandidates = null,
+        FakePostAnalysisCacheService? cache = null)
         => new(
             new FakeDeepSeekService(analyze, findDuplicates, findDuplicateCandidates, findCrossMatches),
             new FakeMuxoScraperService(scrape ?? (_ => new List<MuxoEvent>())),
+            cache ?? new FakePostAnalysisCacheService(),
             db,
             NullLogger<EventService>.Instance);
 
@@ -1112,7 +1114,8 @@ public class EventServiceTests
         {
             TestData.NonEventResult()
         });
-        var service = new EventService(fake, new FakeMuxoScraperService(_ => new List<MuxoEvent>()), fixture.Db, NullLogger<EventService>.Instance);
+        var service = new EventService(fake, new FakeMuxoScraperService(_ => new List<MuxoEvent>()),
+            new FakePostAnalysisCacheService(), fixture.Db, NullLogger<EventService>.Instance);
         var range = Range("2026-09-01", "2026-09-30");
 
         await service.RecognizeEventsAsync(
@@ -1298,5 +1301,81 @@ public class EventServiceTests
                 throw new DbUpdateException("Simulated unique constraint violation.", (Exception?)null);
             return base.SaveChangesAsync(cancellationToken);
         }
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_WithCachedAnalyses_SkipsTheLlm()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
+
+        var cache = new FakePostAnalysisCacheService();
+        cache.Seed(PostAnalysisCacheService.ComputePostHash(posts[0], null),
+            TestData.EventResult("Concierto X", "2026-09-19T22:00:00", "Sábado 19", "Resumen X"));
+
+        // The LLM must not be called for cached posts.
+        var service = CreateService(fixture.Db,
+            (_, _) => throw new InvalidOperationException("The LLM must not be called for cached posts"),
+            cache: cache);
+
+        var response = await service.RecognizeEventsAsync(posts, "key");
+
+        Assert.Equal(1, response.EventsFound);
+        Assert.Equal("Concierto X", response.Events[0].Title);
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+        Assert.Equal(0, cache.StoreCallCount);
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_AnalyzesMisses_StoresThemAndReusesOnSecondRun()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
+
+        var analyzeCalls = 0;
+        var cache = new FakePostAnalysisCacheService();
+        var service = CreateService(fixture.Db, (_, _) =>
+        {
+            analyzeCalls++;
+            return new List<PostAnalysisResult>
+            {
+                TestData.EventResult("Concierto X", "2026-09-19T22:00:00", "Sábado 19", "Resumen X")
+            };
+        }, cache: cache);
+
+        await service.RecognizeEventsAsync(posts, "key");
+        await service.RecognizeEventsAsync(posts, "key");
+
+        // First run analyzes and caches; the second run is served from the cache.
+        Assert.Equal(1, analyzeCalls);
+        Assert.Equal(1, cache.StoreCallCount);
+        Assert.Contains(PostAnalysisCacheService.ComputePostHash(posts[0], null), cache.StoredHashes);
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_CacheEntryForAnotherRange_IsNotReused()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
+
+        // The range influences how relative dates are resolved, so the cached
+        // analysis of one range must not serve a request with another range.
+        var rangeA = new DateRange(new DateTime(2026, 9, 1), new DateTime(2026, 9, 30));
+        var cache = new FakePostAnalysisCacheService();
+        cache.Seed(PostAnalysisCacheService.ComputePostHash(posts[0], rangeA),
+            TestData.EventResult("Concierto X", "2026-09-19T22:00:00", "Sábado 19", "Resumen X"));
+
+        var analyzeCalls = 0;
+        var service = CreateService(fixture.Db, (_, _) =>
+        {
+            analyzeCalls++;
+            return new List<PostAnalysisResult> { TestData.NonEventResult() };
+        }, cache: cache);
+
+        var rangeB = new DateRange(new DateTime(2026, 10, 1), new DateTime(2026, 10, 31));
+        await service.RecognizeEventsAsync(posts, "key", rangeB);
+
+        Assert.Equal(1, analyzeCalls);
     }
 }

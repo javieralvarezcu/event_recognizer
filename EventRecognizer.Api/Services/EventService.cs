@@ -14,17 +14,20 @@ public class EventService : IEventService
 
     private readonly IDeepSeekService _deepSeekService;
     private readonly IMuxoScraperService _muxoScraperService;
+    private readonly IPostAnalysisCacheService _postAnalysisCache;
     private readonly AppDbContext _dbContext;
     private readonly ILogger<EventService> _logger;
 
     public EventService(
         IDeepSeekService deepSeekService,
         IMuxoScraperService muxoScraperService,
+        IPostAnalysisCacheService postAnalysisCache,
         AppDbContext dbContext,
         ILogger<EventService> logger)
     {
         _deepSeekService = deepSeekService;
         _muxoScraperService = muxoScraperService;
+        _postAnalysisCache = postAnalysisCache;
         _dbContext = dbContext;
         _logger = logger;
     }
@@ -148,8 +151,9 @@ public class EventService : IEventService
             DateRange? dateRange,
             CancellationToken ct)
     {
-        // 1. Send all posts to DeepSeek for analysis
-        var analyses = await _deepSeekService.AnalyzePostsAsync(posts, deepSeekApiKey, dateRange, ct);
+        // 1. Resolve the analysis of every post: cached when the post (with the
+        //    requested range) was already analyzed, fresh LLM analysis otherwise.
+        var analyses = await AnalyzePostsWithCacheAsync(posts, deepSeekApiKey, dateRange, ct);
 
         // 2. Decide which posts are valid events for the requested date range. A post is
         //    valid when the LLM says it is an event AND, if a range was requested, the
@@ -177,6 +181,58 @@ public class EventService : IEventService
         }
 
         return (analyses, isValidEvent, eventPosts.Values.ToList());
+    }
+
+    /// <summary>
+    /// Analyzes posts skipping the LLM for the ones whose content hash is already in
+    /// the analysis cache (whether they were events or not), and stores the fresh
+    /// results so repeated submissions of the same dataset do not burn tokens on
+    /// re-analysis. Cache failures degrade to plain analysis.
+    /// </summary>
+    private async Task<List<PostAnalysisResult>> AnalyzePostsWithCacheAsync(
+        List<InstagramPost> posts,
+        string deepSeekApiKey,
+        DateRange? dateRange,
+        CancellationToken ct)
+    {
+        var hashes = posts.Select(p => PostAnalysisCacheService.ComputePostHash(p, dateRange)).ToList();
+        var cached = await _postAnalysisCache.GetCachedAsync(hashes, ct);
+
+        var analyses = new PostAnalysisResult[posts.Count];
+        var misses = new List<int>();
+        for (var i = 0; i < posts.Count; i++)
+        {
+            if (cached.TryGetValue(hashes[i], out var analysis))
+                analyses[i] = analysis;
+            else
+                misses.Add(i);
+        }
+
+        if (misses.Count == 0)
+        {
+            _logger.LogInformation("Post analysis cache hit for all {Count} posts", posts.Count);
+            return analyses.ToList();
+        }
+
+        if (misses.Count < posts.Count)
+            _logger.LogInformation("Post analysis cache hit for {Hits}/{Total} posts",
+                posts.Count - misses.Count, posts.Count);
+
+        var fresh = await _deepSeekService.AnalyzePostsAsync(
+            misses.Select(i => posts[i]).ToList(), deepSeekApiKey, dateRange, ct);
+
+        var entries = new List<(string PostHash, string PostId, PostAnalysisResult Analysis)>(misses.Count);
+        for (var j = 0; j < misses.Count; j++)
+        {
+            var index = misses[j];
+            var analysis = j < fresh.Count ? fresh[j] : new PostAnalysisResult { IsEvent = false };
+            analyses[index] = analysis;
+            entries.Add((hashes[index], posts[index].PostId, analysis));
+        }
+
+        await _postAnalysisCache.StoreAsync(entries, ct);
+
+        return analyses.ToList();
     }
 
     private static EventRecord BuildEventRecord(InstagramPost post, PostAnalysisResult analysis)

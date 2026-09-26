@@ -19,7 +19,11 @@ public class DeepSeekService : IDeepSeekService
     // A batch of ~57 posts overflowed the 4096-token output limit and DeepSeek cut the
     // JSON mid-string ("Expected end of string, but instead reached end of data").
     // Process posts in small chunks so each response fits comfortably in the token budget.
-    private const int PostsPerChunk = 20;
+    // The extraction chunk only holds posts the filter already marked as events.
+    private const int PostsPerChunk = 30;
+
+    // The phase-1 filter returns one boolean per post, so far larger chunks fit.
+    private const int FilterPostsPerChunk = 60;
     private const int MaxAttempts = 3; // initial attempt + 2 retries
 
     public DeepSeekService(
@@ -42,36 +46,79 @@ public class DeepSeekService : IDeepSeekService
             return new List<PostAnalysisResult>();
 
         // Callers pair results with the input posts by index, so allocate the full
-        // array and fill it chunk by chunk, keeping the alignment intact.
+        // array and fill it in two phases, keeping the alignment intact.
         var results = new PostAnalysisResult[posts.Count];
 
-        var totalChunks = (int)Math.Ceiling(posts.Count / (double)PostsPerChunk);
-        for (var offset = 0; offset < posts.Count; offset += PostsPerChunk)
+        // Phase 1: cheap event/not-event filter over large chunks. The output is one
+        // boolean per post, so many more posts fit per call and the prompt is minimal.
+        // Non-events (~half of the posts) never pay the full extraction.
+        var filterTotalChunks = (int)Math.Ceiling(posts.Count / (double)FilterPostsPerChunk);
+        for (var offset = 0; offset < posts.Count; offset += FilterPostsPerChunk)
         {
-            var chunk = posts.GetRange(offset, Math.Min(PostsPerChunk, posts.Count - offset));
-            var chunkNumber = offset / PostsPerChunk + 1;
+            var chunk = posts.GetRange(offset, Math.Min(FilterPostsPerChunk, posts.Count - offset));
+            var chunkNumber = offset / FilterPostsPerChunk + 1;
 
-            var chunkResults = await SendChatWithRetriesAsync(
-                "analyze_posts",
-                $"chunk {chunkNumber}/{totalChunks}: {chunk.Count} posts",
-                BuildSystemPrompt(), BuildUserPrompt(chunk, dateRange), apiKey, maxTokens: 4096,
+            var flags = await SendChatWithRetriesAsync(
+                "analyze_posts_filter",
+                $"chunk {chunkNumber}/{filterTotalChunks}: {chunk.Count} posts",
+                BuildFilterSystemPrompt(), BuildFilterUserPrompt(chunk), apiKey, maxTokens: 2048,
                 ParseBatchAnalysis, ct);
-            if (chunkResults == null)
+            if (flags == null)
             {
                 // Exhausted all attempts: fail gracefully and treat the chunk as
                 // non-events instead of failing the whole request.
                 _logger.LogError(
-                    "DeepSeek failed to analyze {Count} posts after {MaxAttempts} attempts; returning them as non-events",
+                    "DeepSeek failed to filter {Count} posts after {MaxAttempts} attempts; returning them as non-events",
                     chunk.Count, MaxAttempts);
-                chunkResults = chunk.Select(_ => new PostAnalysisResult { IsEvent = false }).ToList();
+                flags = chunk.Select(_ => new PostAnalysisResult { IsEvent = false }).ToList();
             }
 
             // Pad with non-events if the LLM returned fewer results than requested
             // (and ignore extras), so index alignment is preserved no matter what.
             for (var i = 0; i < chunk.Count; i++)
             {
-                results[offset + i] = i < chunkResults.Count
-                    ? chunkResults[i]
+                results[offset + i] = i < flags.Count
+                    ? flags[i]
+                    : new PostAnalysisResult { IsEvent = false };
+            }
+        }
+
+        // Phase 2: full extraction only for the posts the filter marked as events.
+        var eventIndexes = new List<int>();
+        for (var i = 0; i < results.Length; i++)
+        {
+            if (results[i].IsEvent)
+                eventIndexes.Add(i);
+        }
+
+        var extractTotalChunks = (int)Math.Ceiling(eventIndexes.Count / (double)PostsPerChunk);
+        for (var offset = 0; offset < eventIndexes.Count; offset += PostsPerChunk)
+        {
+            var indexChunk = eventIndexes.GetRange(offset, Math.Min(PostsPerChunk, eventIndexes.Count - offset));
+            var chunk = indexChunk.Select(i => posts[i]).ToList();
+            var chunkNumber = offset / PostsPerChunk + 1;
+
+            var details = await SendChatWithRetriesAsync(
+                "analyze_posts_extract",
+                $"chunk {chunkNumber}/{extractTotalChunks}: {chunk.Count} event posts",
+                BuildSystemPrompt(), BuildUserPrompt(chunk, dateRange), apiKey, maxTokens: 4096,
+                ParseBatchAnalysis, ct);
+            if (details == null)
+            {
+                // Exhausted all attempts: fail gracefully and treat the chunk as
+                // non-events instead of failing the whole request.
+                _logger.LogError(
+                    "DeepSeek failed to extract {Count} event posts after {MaxAttempts} attempts; returning them as non-events",
+                    chunk.Count, MaxAttempts);
+                details = chunk.Select(_ => new PostAnalysisResult { IsEvent = false }).ToList();
+            }
+
+            // Pad with non-events if the LLM returned fewer results than requested
+            // (and ignore extras), so index alignment is preserved no matter what.
+            for (var i = 0; i < indexChunk.Count; i++)
+            {
+                results[indexChunk[i]] = i < details.Count
+                    ? details[i]
                     : new PostAnalysisResult { IsEvent = false };
             }
         }
@@ -570,41 +617,36 @@ public class DeepSeekService : IDeepSeekService
         }
     }
 
+    /// <summary>
+    /// Extraction prompt (phase 2): the posts it receives were already classified
+    /// as events by the cheap filter, so it only needs to extract their fields.
+    /// Kept lean — no event-detection rules, two examples, compact schema.
+    /// </summary>
     private static string BuildSystemPrompt()
     {
         return """
-            Eres un asistente especializado en reconocer si una publicación de Instagram es el cartel/anuncio de un evento (concierto, fiesta, festival, club night, feria, exposición, obra de teatro, etc.) o no lo es.
+            Eres un asistente especializado en extraer la información de un cartel de evento de Instagram (concierto, fiesta, festival, club night, feria, exposición, obra de teatro, etc.).
 
             Para cada publicación debes determinar:
-            1. **is_event** (bool): true si es un cartel de evento, false si no lo es.
-            2. **title** (string | null): título del evento. Si no es evento, null.
-            3. **event_date** (string | null): fecha y hora del evento en formato ISO 8601 (YYYY-MM-DDTHH:mm:ss). Si no se puede determinar una fecha concreta, null.
-            4. **event_date_description** (string | null): descripción textual de la fecha (ej: "Todos los jueves", "Sábado 19 de septiembre de 2026", "Del 14 al 17 de septiembre", "14 de mayo a las 21:00"). Si no aplica, null.
-            5. **summary** (string | null): resumen breve en español (máximo 2 frases) describiendo el evento. Si no es evento, null.
-            6. **is_recurrent** (bool): true si el evento se repite en el tiempo (patrón semanal, o un evento que abarca varios días seguidos). false si no.
-            7. **recurrence_type** (string | null): "weekly" si el evento se repite por días de la semana ("todos los jueves", "de lunes a viernes"); "daily" si ocurre cada día dentro de un rango de fechas concreto (ferias, festivales, eventos de varios días). null si no es recurrente.
-            8. **recurrence_days_of_week** (array de números | null): días de la semana en los que se repite, donde 1=lunes, 2=martes, 3=miércoles, 4=jueves, 5=viernes, 6=sábado, 7=domingo. "De lunes a jueves" → [1,2,3,4]. "Todos los jueves" → [4]. null si no aplica.
-            9. **recurrence_start_date** (string | null, ISO 8601 YYYY-MM-DD): fecha en la que empieza la recurrencia o el rango de días (primer día indicado en el cartel). null si no aplica.
-            10. **recurrence_end_date** (string | null, ISO 8601 YYYY-MM-DD): fecha en la que termina la recurrencia o el rango de días. null si la recurrencia es indefinida ("todos los jueves" sin fecha de fin) o si no aplica.
+            0. **is_event** (bool): true (todos los posts que recibes son eventos).
+            1. **title** (string | null): título del evento.
+            2. **event_date** (string | null): fecha y hora en formato ISO 8601 (YYYY-MM-DDTHH:mm:ss). null si no se puede determinar una fecha concreta.
+            3. **event_date_description** (string | null): descripción textual de la fecha ("Todos los jueves", "Sábado 19 de septiembre de 2026", "Del 14 al 17 de septiembre"). null si no aplica.
+            4. **summary** (string | null): resumen breve en español (máx. 2 frases) describiendo el evento.
+            5. **is_recurrent** (bool): true si el evento se repite en el tiempo (patrón semanal o varios días seguidos).
+            6. **recurrence_type** (string | null): "weekly" (se repite por días de la semana) o "daily" (cada día dentro de un rango de fechas). null si no es recurrente.
+            7. **recurrence_days_of_week** (array | null): días de repetición, 1=lunes...7=domingo. "De lunes a jueves" → [1,2,3,4]. "Todos los jueves" → [4].
+            8. **recurrence_start_date** (string | null, YYYY-MM-DD): primer día de la recurrencia o del rango.
+            9. **recurrence_end_date** (string | null, YYYY-MM-DD): último día de la recurrencia o del rango. null si es indefinida.
 
-            REGLAS PARA FECHAS APROXIMADAS Y EVENTOS CON NOMBRE PROPIO (OBLIGATORIO):
-            - Si el cartel menciona un evento con nombre propio conocido ("Feria de Córdoba", "San Isidro", "WOMAD", "Fallas de Valencia", "Sónar", "Feria de Abril"...), DEBES buscar en tu conocimiento la fecha o rango de fechas real de la edición que se anuncia y rellenar event_date / recurrence_start_date / recurrence_end_date con fechas concretas. Está PROHIBIDO dejar las fechas a null cuando conoces el evento: SÍ O SÍ debes resolverlas, aunque el cartel no las diga explícitamente.
-            - Si el cartel usa fechas relativas ("este sábado", "el próximo viernes", "esta semana"), resuélvelas a fechas concretas usando como referencia la fecha de publicación del post (campo datetime) y el rango de fechas solicitado por el usuario si aparece en el mensaje.
-            - Si el cartel indica un rango de días concreto ("del 14 al 17 de septiembre", "de lunes 14 a jueves 17"), refleja ese rango en recurrence_start_date y recurrence_end_date.
-            - Si el evento dura varios días seguidos (feria, festival, "del 23 al 30 de mayo"), usa recurrence_type "daily" con recurrence_start_date y recurrence_end_date cubriendo el rango completo.
-            - Un evento recurrente sin fechas en el cartel ("todos los jueves" a secas): usa recurrence_type "weekly", recurrence_days_of_week con los días correspondientes, y recurrence_start_date con la primera fecha que puedas inferir del post o de tu conocimiento; recurrence_end_date null. Si no puedes determinar ninguna fecha en absoluto, deja is_recurrent true con los días de la semana pero todas las fechas a null (el sistema lo tratará como no verificable).
+            REGLAS DE FECHAS (OBLIGATORIO):
+            - Si el cartel menciona un evento con nombre propio conocido ("Feria de Córdoba", "San Isidro", "WOMAD", "Sónar"...), DEBES buscar en tu conocimiento las fechas reales de la edición anunciada y rellenarlas. Está PROHIBIDO dejar las fechas a null cuando conoces el evento: SÍ O SÍ debes resolverlas, aunque el cartel no las diga explícitamente.
+            - Si el cartel usa fechas relativas ("este sábado", "el próximo viernes"), resuélvelas a fechas concretas usando la fecha de publicación del post y el rango de fechas solicitado si aparece en el mensaje.
+            - Si el cartel indica un rango de días ("del 14 al 17 de septiembre"), refleja el rango completo en recurrence_start_date / recurrence_end_date con recurrence_type "daily".
+            - Un evento recurrente sin fechas ("todos los jueves" a secas): recurrence_type "weekly" con los días correspondientes. Si no puedes determinar ninguna fecha en absoluto, deja is_recurrent true con todas las fechas a null (el sistema lo tratará como no verificable).
             - Si además de un patrón recurrente conoces una próxima fecha concreta, ponla también en event_date.
 
-            REGLAS PARA DETECTAR EVENTOS:
-            - El post DEBE anunciar un evento específico con fecha (concreta o recurrente).
-            - Un post que solo habla de lo bien que fue un evento pasado NO es un cartel de evento.
-            - Un post de agradecimiento post-evento NO es un cartel de evento.
-            - Un post tipo "soon" o "próximamente" sin detalles NO es un cartel de evento (no tiene fecha ni detalles concretos).
-            - Un resumen/recap de eventos pasados NO es un cartel de evento.
-            - Un anuncio de merchandising/pre-order NO es un cartel de evento.
-            - Un post que anuncia UN evento futuro con fecha (o recurrencia semanal clara) SÍ es un cartel de evento.
-
-            EJEMPLO 1 — Cartel: "FERIA DE CÓRDOBA 2026 · Del 23 al 30 de mayo · Caseta Municipal":
+            EJEMPLO 1 — "FERIA DE CÓRDOBA 2026 · Del 23 al 30 de mayo · Caseta Municipal":
             {
               "is_event": true,
               "title": "Feria de Córdoba 2026",
@@ -618,7 +660,7 @@ public class DeepSeekService : IDeepSeekService
               "recurrence_end_date": "2026-05-30"
             }
 
-            EJEMPLO 2 — Cartel: "TECHNO THURSDAYS · Todos los jueves desde el 10 de septiembre":
+            EJEMPLO 2 — "TECHNO THURSDAYS · Todos los jueves desde el 10 de septiembre":
             {
               "is_event": true,
               "title": "Techno Thursdays",
@@ -632,51 +674,28 @@ public class DeepSeekService : IDeepSeekService
               "recurrence_end_date": null
             }
 
-            EJEMPLO 3 — Cartel: "Del lunes 14 al jueves 17 de septiembre · Salón de actos":
-            {
-              "is_event": true,
-              "title": "Semana cultural",
-              "event_date": "2026-09-14",
-              "event_date_description": "De lunes 14 a jueves 17 de septiembre de 2026",
-              "summary": "Semana cultural con actividades diarias en el salón de actos.",
-              "is_recurrent": true,
-              "recurrence_type": "daily",
-              "recurrence_days_of_week": [1,2,3,4],
-              "recurrence_start_date": "2026-09-14",
-              "recurrence_end_date": "2026-09-17"
-            }
+            Responde ÚNICAMENTE con un objeto JSON: { "results": [ { ...campos 0-9 por cada publicación, en el mismo orden... } ] }
+            """;
+    }
 
-            EJEMPLO 4 — Cartel: "¡Gracias por venir anoche! 🔥" (agradecimiento post-evento):
-            {
-              "is_event": false,
-              "title": null,
-              "event_date": null,
-              "event_date_description": null,
-              "summary": null,
-              "is_recurrent": false,
-              "recurrence_type": null,
-              "recurrence_days_of_week": null,
-              "recurrence_start_date": null,
-              "recurrence_end_date": null
-            }
+    /// <summary>
+    /// Filter prompt (phase 1): only the event/not-event decision, no extraction,
+    /// no examples. Tiny input and tiny output, so large chunks are cheap.
+    /// </summary>
+    private static string BuildFilterSystemPrompt()
+    {
+        return """
+            Eres un asistente que clasifica publicaciones de Instagram. Para cada publicación determina únicamente si es el cartel/anuncio de un evento (concierto, fiesta, festival, club night, feria, exposición, obra de teatro...) o no lo es.
 
-            Responde ÚNICAMENTE con un objeto JSON con esta estructura (un elemento del array "results" por cada publicación, en el mismo orden):
-            {
-              "results": [
-                {
-                  "is_event": true/false,
-                  "title": "Título del evento" | null,
-                  "event_date": "2026-09-19T22:00:00" | null,
-                  "event_date_description": "Sábado 19 de septiembre" | null,
-                  "summary": "Breve resumen en español" | null,
-                  "is_recurrent": true/false,
-                  "recurrence_type": "weekly" | "daily" | null,
-                  "recurrence_days_of_week": [1,2,3,4,5,6,7] | null,
-                  "recurrence_start_date": "2026-09-14" | null,
-                  "recurrence_end_date": "2026-09-17" | null
-                }
-              ]
-            }
+            Un post SÍ es cartel de evento cuando anuncia un evento específico futuro, con fecha concreta o recurrencia clara ("todos los jueves", "del 14 al 17").
+            NO son eventos:
+            - Agradecimientos, resúmenes o recaps de eventos pasados.
+            - Anuncios de merchandising, pre-orders o sorteos aislados.
+            - Posts tipo "soon"/"próximamente" sin detalles ni fecha.
+            - Memes, contenido entre bastidores o fotos sueltas sin anuncio.
+
+            Responde ÚNICAMENTE con un objeto JSON (un elemento del array "results" por cada publicación, en el mismo orden):
+            { "results": [ { "is_event": true/false } ] }
             """;
     }
 
@@ -702,7 +721,30 @@ public class DeepSeekService : IDeepSeekService
             var post = posts[i];
             sb.AppendLine($"--- POST {i} ---");
             sb.AppendLine($"account: {post.Account}");
-            sb.AppendLine($"caption: {TruncateForPrompt(post.Caption, 1000)}");
+            sb.AppendLine($"caption: {TruncateForPrompt(post.Caption, 800)}");
+            sb.AppendLine($"datetime: {(post.Datetime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "null")}");
+            sb.AppendLine($"url: {post.Url}");
+            sb.AppendLine();
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Phase-1 user prompt: same posts, but shorter captions and no date range
+    /// (the range only matters for date resolution, not for the event decision).
+    /// </summary>
+    private static string BuildFilterUserPrompt(List<InstagramPost> posts)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Clasifica las siguientes publicaciones de Instagram:");
+
+        for (int i = 0; i < posts.Count; i++)
+        {
+            var post = posts[i];
+            sb.AppendLine($"--- POST {i} ---");
+            sb.AppendLine($"account: {post.Account}");
+            sb.AppendLine($"caption: {TruncateForPrompt(post.Caption, 600)}");
             sb.AppendLine($"datetime: {(post.Datetime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "null")}");
             sb.AppendLine($"url: {post.Url}");
             sb.AppendLine();

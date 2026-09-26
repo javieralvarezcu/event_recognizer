@@ -30,11 +30,13 @@ Event Recognizer es una API REST que analiza publicaciones de Instagram y detect
 El flujo de reconocimiento:
 
 1. El cliente envía un lote de posts de Instagram a `POST /api/events/recognize` junto con su API key de DeepSeek y, opcionalmente, un rango de fechas (`dateFrom`/`dateTo`).
-2. El servidor formatea los posts y los envía a DeepSeek con un prompt en español (incluye el rango solicitado como contexto y exige resolver fechas aproximadas o de eventos con nombre propio).
-3. DeepSeek analiza cada post y devuelve un JSON estructurado indicando si es evento, título, fecha, resumen y patrón de recurrencia (semanal o rango de días).
-4. Si se solicitó un rango de fechas, el servidor evalúa de forma determinista si cada evento — con fecha concreta o recurrente — ocurre dentro de ese rango; los que no, se tratan como si no fueran eventos.
-5. Los eventos válidos se persisten en SQL Server (con deduplicación por `PostId`).
-6. Se devuelven **todos** los posts al cliente — tanto los clasificados como evento como los que no — con la información estructurada correspondiente.
+2. Los posts cuyo hash de contenido (cuenta + caption + fecha + url + rango) ya está en la caché de análisis se sirven de ella **sin llamar al LLM**; solo los nuevos se analizan.
+3. El análisis es en dos fases: un **filtro barato** (`is_event`) para todos los posts nuevos y la **extracción completa** (título, fecha, resumen, recurrencia) solo para los que son eventos.
+4. El servidor formatea los posts y los envía a DeepSeek con un prompt en español (incluye el rango solicitado como contexto y exige resolver fechas aproximadas o de eventos con nombre propio).
+5. DeepSeek analiza cada post y devuelve un JSON estructurado indicando si es evento, título, fecha, resumen y patrón de recurrencia (semanal o rango de días).
+6. Si se solicitó un rango de fechas, el servidor evalúa de forma determinista si cada evento — con fecha concreta o recurrente — ocurre dentro de ese rango; los que no, se tratan como si no fueran eventos.
+7. Los eventos válidos se persisten en SQL Server (con deduplicación por `PostId`).
+8. Se devuelven **todos** los posts al cliente — tanto los clasificados como evento como los que no — con la información estructurada correspondiente.
 
 El endpoint `POST /api/events/recognize-deduplicated` ofrece el mismo reconocimiento evitando persistir de nuevo eventos que ya estén guardados (duplicados decididos por el LLM); ver la sección de endpoints.
 
@@ -610,7 +612,7 @@ adicional. **La API key nunca se guarda.**
 | Columna | Tipo | Restricciones | Descripción |
 |---|---|---|---|
 | `Id` | `int` | PK, IDENTITY | Clave primaria autoincremental |
-| `Operation` | `nvarchar(50)` | NOT NULL, INDEX | Operación: `analyze_posts`, `cleanup_duplicates`, `dedup_candidates` o `cross_match` |
+| `Operation` | `nvarchar(50)` | NOT NULL, INDEX | Operación: `analyze_posts_filter`, `analyze_posts_extract`, `cleanup_duplicates`, `dedup_candidates` o `cross_match` |
 | `ContextSummary` | `nvarchar(500)` | NULL | Contexto legible del intercambio (nº de posts/eventos, nº de chunk, mes…) |
 | `SystemPrompt` | `nvarchar(max)` | NOT NULL | System prompt enviado |
 | `UserPrompt` | `nvarchar(max)` | NOT NULL | User prompt enviado |
@@ -630,6 +632,21 @@ adicional. **La API key nunca se guarda.**
 | `DurationMs` | `bigint` | NOT NULL | Duración del intercambio en milisegundos |
 | `StartedAtUtc` | `datetime2` | NOT NULL, INDEX | Instante UTC exacto en que se envió el request |
 | `CompletedAtUtc` | `datetime2` | NOT NULL | Instante UTC exacto en que terminó el intercambio |
+
+### Tabla `PostAnalysisCaches` (caché de análisis de posts)
+
+Caché del análisis del LLM por post, clave por el hash del contenido (cuenta + caption
++ fecha de publicación + url + rango solicitado). Los posts ya analizados — sean
+eventos o no — **no se vuelven a mandar al LLM** en ejecuciones repetidas; solo los
+posts nuevos pagan tokens. Un fallo de caché degrada a análisis normal.
+
+| Columna | Tipo | Restricciones | Descripción |
+|---|---|---|---|
+| `Id` | `int` | PK, IDENTITY | Clave primaria autoincremental |
+| `PostHash` | `nvarchar(64)` | NOT NULL, UNIQUE | SHA-256 en hex del fingerprint del post + rango |
+| `PostId` | `nvarchar(100)` | NOT NULL | PostId del post analizado (diagnóstico) |
+| `AnalysisJson` | `nvarchar(max)` | NOT NULL | `PostAnalysisResult` serializado |
+| `CreatedAt` | `datetime2` | NOT NULL | Fecha de creación del registro |
 
 ---
 

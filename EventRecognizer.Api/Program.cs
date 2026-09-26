@@ -37,6 +37,7 @@ builder.Services.AddHttpClient("MuxoJaleo", client =>
 // --- App Services ---
 builder.Services.AddScoped<IDeepSeekService, DeepSeekService>();
 builder.Services.AddScoped<IDeepSeekAuditService, DeepSeekAuditService>();
+builder.Services.AddScoped<IPostAnalysisCacheService, PostAnalysisCacheService>();
 builder.Services.AddScoped<IMuxoScraperService, MuxoScraperService>();
 builder.Services.AddScoped<IEventService, EventService>();
 

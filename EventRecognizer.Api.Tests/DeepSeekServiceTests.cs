@@ -32,6 +32,17 @@ public class DeepSeekServiceTests
             Content = new StringContent(TestData.BuildDeepSeekResponse(results, finishReason), Encoding.UTF8, "application/json")
         });
 
+    /// <summary>Filter (phase 1) response: one is_event flag per post, events only where listed.</summary>
+    private static Task<HttpResponseMessage> OkFilterResponse(IEnumerable<int> eventIndexes, int postCount)
+        => OkResponse(
+            Enumerable.Range(0, postCount)
+                .Select(i => new PostAnalysisResult { IsEvent = eventIndexes.Contains(i) })
+                .ToList());
+
+    /// <summary>Filter response marking every post as an event.</summary>
+    private static Task<HttpResponseMessage> OkAllEventsFilter(int postCount)
+        => OkFilterResponse(Enumerable.Range(0, postCount), postCount);
+
     /// <summary>
     /// Inspects the request body to find which post indexes were sent, and returns one
     /// result per post whose title carries that index — so alignment across chunks is
@@ -69,10 +80,10 @@ public class DeepSeekServiceTests
     public async Task AnalyzePostsAsync_WithValidResponse_ReturnsParsedResults()
     {
         var posts = CreatePosts(3);
+        _handler.Enqueue((_, _) => OkFilterResponse(new[] { 0, 2 }, 3));
         _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult>
         {
             TestData.EventResult("Fiesta A"),
-            TestData.NonEventResult(),
             TestData.EventResult("Fiesta B")
         }));
 
@@ -84,27 +95,34 @@ public class DeepSeekServiceTests
         Assert.False(results[1].IsEvent);
         Assert.Equal("Fiesta B", results[2].Title);
 
-        var request = Assert.Single(_handler.Requests);
-        Assert.Equal(HttpMethod.Post, request.Method);
-        Assert.Contains("api.deepseek.com", request.RequestUri!.ToString());
-        Assert.Equal("Bearer test-api-key", request.Headers.Authorization!.ToString());
+        // Phase 1 filter over all posts, then phase 2 extraction for the 2 events.
+        Assert.Equal(2, _handler.Requests.Count);
+        Assert.All(_handler.Requests, request =>
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Contains("api.deepseek.com", request.RequestUri!.ToString());
+            Assert.Equal("Bearer test-api-key", request.Headers.Authorization!.ToString());
+        });
+        Assert.Contains("Clasifica las siguientes publicaciones", _handler.RequestBodies[0]);
+        Assert.Contains("Analiza las siguientes publicaciones", _handler.RequestBodies[1]);
     }
 
     [Fact]
     public async Task AnalyzePostsAsync_With45Posts_SplitsIntoChunksAndPreservesIndexAlignment()
     {
         var posts = CreatePosts(45);
-        for (var i = 0; i < 3; i++) // one queued response per chunk (20 + 20 + 5)
-            _handler.Enqueue(RespondWithIndexedResults);
+        _handler.Enqueue(RespondWithIndexedResults); // filter: one call for all 45 posts
+        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 1: 30 posts
+        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 2: 15 posts
 
         var results = await _service.AnalyzePostsAsync(posts, "key");
 
         Assert.Equal(posts.Count, results.Count);
-        // 20 posts per chunk: 20 + 20 + 5
+        // Filter (45 in one chunk of 60) + extraction (30 + 15 per chunk).
         Assert.Equal(3, _handler.Requests.Count);
-        Assert.Equal(20, CountPostsInBody(_handler.RequestBodies[0]));
-        Assert.Equal(20, CountPostsInBody(_handler.RequestBodies[1]));
-        Assert.Equal(5, CountPostsInBody(_handler.RequestBodies[2]));
+        Assert.Equal(45, CountPostsInBody(_handler.RequestBodies[0]));
+        Assert.Equal(30, CountPostsInBody(_handler.RequestBodies[1]));
+        Assert.Equal(15, CountPostsInBody(_handler.RequestBodies[2]));
 
         for (var i = 0; i < posts.Count; i++)
         {
@@ -131,13 +149,14 @@ public class DeepSeekServiceTests
     public async Task AnalyzePostsAsync_WithTruncatedResponse_RetriesAndRecovers()
     {
         var posts = CreatePosts(5);
+        _handler.Enqueue((_, _) => OkAllEventsFilter(posts.Count));
         _handler.Enqueue(HttpStatusCode.OK, TestData.BuildDeepSeekResponse(new List<PostAnalysisResult>(), finishReason: "length"));
         _handler.Enqueue((_, _) => OkResponse(
             Enumerable.Range(0, posts.Count).Select(_ => TestData.EventResult("OK")).ToList()));
 
         var results = await _service.AnalyzePostsAsync(posts, "key");
 
-        Assert.Equal(2, _handler.Requests.Count);
+        Assert.Equal(3, _handler.Requests.Count);
         Assert.All(results, r => Assert.True(r.IsEvent));
     }
 
@@ -147,12 +166,13 @@ public class DeepSeekServiceTests
         var posts = CreatePosts(3);
         _handler.Enqueue(HttpStatusCode.TooManyRequests, "{}");
         _handler.Enqueue(HttpStatusCode.ServiceUnavailable, "{}");
+        _handler.Enqueue((_, _) => OkAllEventsFilter(posts.Count));
         _handler.Enqueue((_, _) => OkResponse(
             Enumerable.Range(0, posts.Count).Select(_ => TestData.EventResult()).ToList()));
 
         var results = await _service.AnalyzePostsAsync(posts, "key");
 
-        Assert.Equal(3, _handler.Requests.Count);
+        Assert.Equal(4, _handler.Requests.Count);
         Assert.All(results, r => Assert.True(r.IsEvent));
     }
 
@@ -182,6 +202,9 @@ public class DeepSeekServiceTests
     public async Task AnalyzePostsAsync_WithFewerResultsThanPosts_PadsWithNonEvents()
     {
         var posts = CreatePosts(5);
+        // Filter returns only one flag for 5 posts (the rest are padded as non-events),
+        // and only that one post goes to the extraction phase.
+        _handler.Enqueue((_, _) => OkFilterResponse(new[] { 0 }, posts.Count));
         _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult>
         {
             TestData.EventResult("Solo uno")
@@ -198,8 +221,10 @@ public class DeepSeekServiceTests
     public async Task AnalyzePostsAsync_WithExtraResults_IgnoresThem()
     {
         var posts = CreatePosts(3);
-        var extras = Enumerable.Range(0, 7).Select(i => TestData.EventResult($"R{i}")).ToList();
-        _handler.Enqueue((_, _) => OkResponse(extras));
+        _handler.Enqueue((_, _) => OkResponse(
+            Enumerable.Range(0, 7).Select(_ => new PostAnalysisResult { IsEvent = true }).ToList()));
+        _handler.Enqueue((_, _) => OkResponse(
+            Enumerable.Range(0, 7).Select(i => TestData.EventResult($"R{i}")).ToList()));
 
         var results = await _service.AnalyzePostsAsync(posts, "key");
 
@@ -211,34 +236,39 @@ public class DeepSeekServiceTests
     [Fact]
     public async Task AnalyzePostsAsync_WithOneChunkFailing_ReturnsNonEventsForThatChunkOnly()
     {
-        var posts = CreatePosts(25); // 20 + 5
-        _handler.Enqueue(RespondWithIndexedResults); // first chunk succeeds
+        var posts = CreatePosts(35); // extraction: 30 + 5
+        _handler.Enqueue(RespondWithIndexedResults); // filter: all events
+        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 1 (30) succeeds
         for (var i = 0; i < 3; i++)
-            _handler.Enqueue(HttpStatusCode.OK, "not json"); // second chunk exhausts retries
+            _handler.Enqueue(HttpStatusCode.OK, "not json"); // chunk 2 (5) exhausts retries
 
         var results = await _service.AnalyzePostsAsync(posts, "key");
 
         Assert.Equal(posts.Count, results.Count);
-        Assert.Equal(4, _handler.Requests.Count);
+        Assert.Equal(5, _handler.Requests.Count);
 
-        for (var i = 0; i < 20; i++)
+        for (var i = 0; i < 30; i++)
         {
             Assert.True(results[i].IsEvent);
             Assert.Equal($"title-{i}", results[i].Title);
         }
-        Assert.All(results.Skip(20), r => Assert.False(r.IsEvent));
+        Assert.All(results.Skip(30), r => Assert.False(r.IsEvent));
     }
 
     [Fact]
     public async Task AnalyzePostsAsync_WithDateRange_IncludesRangeInUserPrompt()
     {
         var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkAllEventsFilter(posts.Count));
         _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
 
         await _service.AnalyzePostsAsync(posts, "key",
             new DateRange(new DateTime(2026, 9, 1), new DateTime(2026, 9, 30)));
 
-        var body = Assert.Single(_handler.RequestBodies);
+        // The range only matters for date resolution, so it goes to the extraction
+        // prompt and stays out of the cheap filter.
+        Assert.DoesNotContain("RANGO DE FECHAS SOLICITADO", _handler.RequestBodies[0]);
+        var body = _handler.RequestBodies[1]!;
         Assert.Contains("RANGO DE FECHAS SOLICITADO", body);
         Assert.Contains("Desde: 2026-09-01", body);
         Assert.Contains("Hasta: 2026-09-30", body);
@@ -248,25 +278,26 @@ public class DeepSeekServiceTests
     public async Task AnalyzePostsAsync_WithoutDateRange_OmitsRangeFromPrompt()
     {
         var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkAllEventsFilter(posts.Count));
         _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
 
         await _service.AnalyzePostsAsync(posts, "key");
 
-        var body = Assert.Single(_handler.RequestBodies);
-        Assert.DoesNotContain("RANGO DE FECHAS SOLICITADO", body);
+        Assert.DoesNotContain("RANGO DE FECHAS SOLICITADO", _handler.RequestBodies[1]);
     }
 
     [Fact]
     public async Task AnalyzePostsAsync_WithOpenEndedRange_FormatsMissingBounds()
     {
         var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkAllEventsFilter(posts.Count));
         _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
 
         await _service.AnalyzePostsAsync(posts, "key", new DateRange(new DateTime(2026, 9, 1), null));
 
         // Deserialize the payload: System.Text.Json escapes non-ASCII chars, so the
         // assertions must run on the decoded prompt text, not the raw JSON body.
-        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(Assert.Single(_handler.RequestBodies)!)!;
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(_handler.RequestBodies[1]!)!;
         var userPrompt = payload.Messages[1].Content;
         Assert.Contains("Desde: 2026-09-01", userPrompt);
         Assert.Contains("Hasta: (sin límite)", userPrompt);
@@ -276,18 +307,40 @@ public class DeepSeekServiceTests
     public async Task AnalyzePostsAsync_SystemPrompt_InstructsRecurrenceAndNamedEventResolution()
     {
         var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkAllEventsFilter(posts.Count));
         _handler.Enqueue((_, _) => OkResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
 
         await _service.AnalyzePostsAsync(posts, "key");
 
-        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(Assert.Single(_handler.RequestBodies)!)!;
-        // The system prompt must carry the recurrence schema, the SÍ O SÍ named-event
-        // date rule and the few-shot example.
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(_handler.RequestBodies[1]!)!;
+        // The extraction system prompt must carry the recurrence schema, the SÍ O SÍ
+        // named-event date rule and the few-shot examples — trimmed to the essentials.
         var systemPrompt = payload.Messages[0].Content;
         Assert.Contains("recurrence_days_of_week", systemPrompt);
         Assert.Contains("recurrence_type", systemPrompt);
         Assert.Contains("SÍ O SÍ", systemPrompt);
         Assert.Contains("Feria de Córdoba", systemPrompt);
+        Assert.DoesNotContain("EJEMPLO 4", systemPrompt);
+        Assert.DoesNotContain("REGLAS PARA DETECTAR EVENTOS", systemPrompt);
+    }
+
+    [Fact]
+    public async Task AnalyzePostsAsync_FilterPrompt_IsMinimal()
+    {
+        var posts = CreatePosts(3);
+        _handler.Enqueue((_, _) => OkAllEventsFilter(posts.Count));
+        _handler.Enqueue((_, _) => OkResponse(
+            Enumerable.Range(0, posts.Count).Select(_ => TestData.NonEventResult()).ToList()));
+
+        await _service.AnalyzePostsAsync(posts, "key");
+
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(_handler.RequestBodies[0]!)!;
+        var filterPrompt = payload.Messages[0].Content;
+        Assert.Contains("is_event", filterPrompt);
+        // No extraction schema, rules or examples in the cheap filter.
+        Assert.DoesNotContain("recurrence_type", filterPrompt);
+        Assert.DoesNotContain("EJEMPLO", filterPrompt);
+        Assert.DoesNotContain("SÍ O SÍ", filterPrompt);
     }
 
     private static List<CleanupEventItem> CreateCleanupEvents()
@@ -574,6 +627,7 @@ public class DeepSeekServiceTests
     [Fact]
     public async Task SendChat_WithValidResponse_RecordsAuditRow()
     {
+        // A non-event post stops after the cheap filter phase: one exchange, one audit row.
         var posts = CreatePosts(1);
         var usage = new DeepSeekUsage { PromptTokens = 123, CompletionTokens = 45, TotalTokens = 168 };
         _handler.Enqueue(HttpStatusCode.OK,
@@ -582,14 +636,14 @@ public class DeepSeekServiceTests
         await _service.AnalyzePostsAsync(posts, "super-secret-key");
 
         var log = Assert.Single(_service.Audit.RecordedLogs);
-        Assert.Equal("analyze_posts", log.Operation);
+        Assert.Equal("analyze_posts_filter", log.Operation);
         Assert.Contains("chunk 1/1", log.ContextSummary);
         Assert.True(log.Succeeded);
         Assert.Equal(200, log.HttpStatusCode);
         Assert.Equal("stop", log.FinishReason);
         Assert.Equal(1, log.Attempt);
         Assert.Equal("deepseek-chat", log.Model);
-        Assert.Equal(4096, log.MaxTokens);
+        Assert.Equal(2048, log.MaxTokens);
         Assert.Equal(0.3, log.Temperature);
 
         // Tokens come from the API usage block, not the heuristic.
@@ -599,7 +653,7 @@ public class DeepSeekServiceTests
         Assert.False(log.TokensEstimated);
 
         // Prompts are stored whole, timestamps are exact and ordered.
-        Assert.Contains("Analiza las siguientes publicaciones", log.UserPrompt);
+        Assert.Contains("Clasifica las siguientes publicaciones", log.UserPrompt);
         Assert.False(string.IsNullOrEmpty(log.SystemPrompt));
         Assert.Contains("--- POST 0 ---", log.UserPrompt);
         Assert.True(log.StartedAtUtc <= log.CompletedAtUtc);

@@ -57,6 +57,49 @@ public sealed class StubHttpClientFactory : IHttpClientFactory
 }
 
 /// <summary>
+/// In-memory IPostAnalysisCacheService: seeded entries are hits, everything else is a
+/// miss; stores into itself so a second run reuses what the first run cached.
+/// </summary>
+public sealed class FakePostAnalysisCacheService : IPostAnalysisCacheService
+{
+    private readonly Dictionary<string, PostAnalysisResult> _entries = new();
+
+    public int StoreCallCount { get; private set; }
+
+    public List<string> StoredHashes { get; } = new();
+
+    public void Seed(string postHash, PostAnalysisResult analysis) => _entries[postHash] = analysis;
+
+    public Task<Dictionary<string, PostAnalysisResult>> GetCachedAsync(
+        IReadOnlyList<string> postHashes,
+        CancellationToken ct = default)
+    {
+        var hits = new Dictionary<string, PostAnalysisResult>();
+        foreach (var hash in postHashes)
+        {
+            if (_entries.TryGetValue(hash, out var analysis))
+                hits[hash] = analysis;
+        }
+
+        return Task.FromResult(hits);
+    }
+
+    public Task StoreAsync(
+        IReadOnlyList<(string PostHash, string PostId, PostAnalysisResult Analysis)> entries,
+        CancellationToken ct = default)
+    {
+        StoreCallCount++;
+        foreach (var (hash, _, analysis) in entries)
+        {
+            _entries[hash] = analysis;
+            StoredHashes.Add(hash);
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
 /// In-memory IDeepSeekAuditService collecting the audit rows the real service persists.
 /// </summary>
 public sealed class FakeDeepSeekAuditService : IDeepSeekAuditService
