@@ -639,9 +639,10 @@ Caché del análisis del LLM por post, clave por el hash del contenido (cuenta +
 + fecha de publicación + url + rango solicitado, con el rango normalizado a día).
 Los posts ya analizados — sean eventos o no — **no se vuelven a mandar al LLM** en
 ejecuciones repetidas; solo los posts nuevos pagan tokens. Las ejecuciones idénticas
-**concurrentes** comparten una única llamada (registro in-flight en memoria), y un
-semáforo global limita a 2 las peticiones HTTP simultáneas a DeepSeek para respetar
-sus rate limits. Un fallo de caché degrada a análisis normal.
+**concurrentes** se serializan en la fase de análisis (turno único): la primera paga
+la llamada y las demás la encuentran en caché al re-comprobar, y un semáforo global
+limita a 2 las peticiones HTTP simultáneas a DeepSeek para respetar sus rate limits.
+Un fallo de caché degrada a análisis normal.
 
 | Columna | Tipo | Restricciones | Descripción |
 |---|---|---|---|

@@ -5,8 +5,8 @@ namespace EventRecognizer.Api.Services;
 /// <summary>
 /// Lookup/storage of the LLM analysis of Instagram posts, keyed by content hash,
 /// so repeated submissions of the same posts do not burn tokens re-analyzing them.
-/// Also coordinates concurrent identical requests (in-flight dedup): only one of
-/// them pays the LLM call, the rest await its result.
+/// Concurrent requests serialize the analysis phase with a single turn: only the
+/// first one pays the LLM call and the rest find everything in the cache.
 /// </summary>
 public interface IPostAnalysisCacheService
 {
@@ -23,19 +23,13 @@ public interface IPostAnalysisCacheService
         CancellationToken ct = default);
 
     /// <summary>
-    /// Registers the hash as being analyzed right now. Returns true (and the task
-    /// to complete later) when this caller became the owner and must run the LLM
-    /// call; returns false (and the in-flight task to await) when another request
-    /// is already analyzing the same post.
+    /// Acquires the single analysis turn. Concurrent requests queue here; the run
+    /// holding the turn analyzes its misses and stores them, and each queued run
+    /// re-checks the cache after acquiring, so identical concurrent runs pay one
+    /// LLM pass between them (and cannot deadlock each other).
     /// </summary>
-    bool TryRegisterInflight(string postHash, out Task<PostAnalysisResult> task);
+    Task WaitForAnalyzeTurnAsync(CancellationToken ct = default);
 
-    /// <summary>Completes the in-flight entry of one hash with its analysis.</summary>
-    void CompleteInflight(string postHash, PostAnalysisResult result);
-
-    /// <summary>
-    /// Fails the in-flight entries (owner's analysis failed), so the awaiting
-    /// requests retry the analysis themselves.
-    /// </summary>
-    void FailInflight(IReadOnlyList<string> postHashes);
+    /// <summary>Releases the analysis turn (always in a finally).</summary>
+    void ReleaseAnalyzeTurn();
 }

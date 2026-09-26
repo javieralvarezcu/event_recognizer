@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,10 +12,10 @@ public class PostAnalysisCacheService : IPostAnalysisCacheService
     private readonly IDbContextFactory<AppDbContext> _dbContextFactory;
     private readonly ILogger<PostAnalysisCacheService> _logger;
 
-    // Hashes currently being analyzed by some request: concurrent identical runs
-    // await the same analysis instead of each paying a DeepSeek call. Process-wide,
-    // so the service must be registered as a singleton.
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<PostAnalysisResult>> _inflight = new();
+    // Single analysis turn shared by all requests in the process: concurrent runs
+    // serialize their miss-analysis here instead of racing each other to the LLM.
+    // Process-wide, so the service must be registered as a singleton.
+    private readonly SemaphoreSlim _analyzeTurn = new(1, 1);
 
     public PostAnalysisCacheService(IDbContextFactory<AppDbContext> dbContextFactory, ILogger<PostAnalysisCacheService> logger)
     {
@@ -42,33 +41,11 @@ public class PostAnalysisCacheService : IPostAnalysisCacheService
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
     }
 
-    public bool TryRegisterInflight(string postHash, out Task<PostAnalysisResult> task)
-    {
-        var tcs = new TaskCompletionSource<PostAnalysisResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (_inflight.TryAdd(postHash, tcs))
-        {
-            task = tcs.Task;
-            return true; // this caller owns the analysis of the hash
-        }
+    public Task WaitForAnalyzeTurnAsync(CancellationToken ct = default)
+        => _analyzeTurn.WaitAsync(ct);
 
-        task = _inflight[postHash].Task;
-        return false; // another request is already analyzing it
-    }
-
-    public void CompleteInflight(string postHash, PostAnalysisResult result)
-    {
-        if (_inflight.TryRemove(postHash, out var tcs))
-            tcs.TrySetResult(result);
-    }
-
-    public void FailInflight(IReadOnlyList<string> postHashes)
-    {
-        foreach (var hash in postHashes)
-        {
-            if (_inflight.TryRemove(hash, out var tcs))
-                tcs.TrySetException(new InvalidOperationException("The in-flight post analysis failed."));
-        }
-    }
+    public void ReleaseAnalyzeTurn()
+        => _analyzeTurn.Release();
 
     public async Task<Dictionary<string, PostAnalysisResult>> GetCachedAsync(
         IReadOnlyList<string> postHashes,

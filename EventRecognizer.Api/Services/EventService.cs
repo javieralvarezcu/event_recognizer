@@ -199,77 +199,66 @@ public class EventService : IEventService
         var cached = await _postAnalysisCache.GetCachedAsync(hashes, ct);
 
         var analyses = new PostAnalysisResult[posts.Count];
-        var misses = new List<int>();
+        var allHits = cached.Count == posts.Count;
         for (var i = 0; i < posts.Count; i++)
         {
             if (cached.TryGetValue(hashes[i], out var analysis))
                 analyses[i] = analysis;
-            else
-                misses.Add(i);
         }
 
-        // Concurrent identical runs race here: both miss the DB cache. The in-flight
-        // registry makes one of them the owner of each hash; the rest await the
-        // owner's analysis instead of each paying a DeepSeek call.
-        var toAnalyze = new List<(int Index, string Hash)>();
-        foreach (var i in misses)
-        {
-            while (true)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                if (_postAnalysisCache.TryRegisterInflight(hashes[i], out var task))
-                {
-                    toAnalyze.Add((i, hashes[i])); // we own the analysis of this hash
-                    break;
-                }
-
-                try
-                {
-                    analyses[i] = await task; // another request is analyzing it
-                    break;
-                }
-                catch (InvalidOperationException)
-                {
-                    // The owning request failed: loop and become the owner ourselves.
-                }
-            }
-        }
-
-        if (toAnalyze.Count == 0)
+        if (allHits)
         {
             _logger.LogInformation("Post analysis cache hit for all {Count} posts", posts.Count);
             return analyses.ToList();
         }
 
-        if (toAnalyze.Count < posts.Count)
-            _logger.LogInformation("Post analysis cache hit for {Hits}/{Total} posts",
-                posts.Count - toAnalyze.Count, posts.Count);
-
+        // Serialize the miss-analysis phase: concurrent identical runs queue here.
+        // The run holding the turn analyzes and stores; each queued run re-checks
+        // the cache after acquiring and finds everything stored, paying nothing.
+        // Serializing (instead of per-hash sharing) cannot deadlock.
+        await _postAnalysisCache.WaitForAnalyzeTurnAsync(ct);
         try
         {
-            var fresh = await _deepSeekService.AnalyzePostsAsync(
-                toAnalyze.Select(t => posts[t.Index]).ToList(), deepSeekApiKey, dateRange, ct);
+            cached = await _postAnalysisCache.GetCachedAsync(hashes, ct);
 
-            var entries = new List<(string PostHash, string PostId, PostAnalysisResult Analysis)>(toAnalyze.Count);
-            for (var j = 0; j < toAnalyze.Count; j++)
+            var misses = new List<int>();
+            for (var i = 0; i < posts.Count; i++)
             {
-                var (index, hash) = toAnalyze[j];
+                if (cached.TryGetValue(hashes[i], out var analysis))
+                    analyses[i] = analysis;
+                else
+                    misses.Add(i);
+            }
+
+            if (misses.Count == 0)
+            {
+                _logger.LogInformation("Post analysis cache hit for all {Count} posts after waiting", posts.Count);
+                return analyses.ToList();
+            }
+
+            if (misses.Count < posts.Count)
+                _logger.LogInformation("Post analysis cache hit for {Hits}/{Total} posts",
+                    posts.Count - misses.Count, posts.Count);
+
+            var fresh = await _deepSeekService.AnalyzePostsAsync(
+                misses.Select(i => posts[i]).ToList(), deepSeekApiKey, dateRange, ct);
+
+            var entries = new List<(string PostHash, string PostId, PostAnalysisResult Analysis)>(misses.Count);
+            for (var j = 0; j < misses.Count; j++)
+            {
+                var index = misses[j];
                 var analysis = j < fresh.Count ? fresh[j] : new PostAnalysisResult { IsEvent = false };
                 analyses[index] = analysis;
-                _postAnalysisCache.CompleteInflight(hash, analysis);
-                entries.Add((hash, posts[index].PostId, analysis));
+                entries.Add((hashes[index], posts[index].PostId, analysis));
             }
 
             await _postAnalysisCache.StoreAsync(entries, ct);
+            return analyses.ToList();
         }
-        catch
+        finally
         {
-            _postAnalysisCache.FailInflight(toAnalyze.Select(t => t.Hash).ToList());
-            throw;
+            _postAnalysisCache.ReleaseAnalyzeTurn();
         }
-
-        return analyses.ToList();
     }
 
     private static EventRecord BuildEventRecord(InstagramPost post, PostAnalysisResult analysis)

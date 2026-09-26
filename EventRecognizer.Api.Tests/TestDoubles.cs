@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -64,7 +63,7 @@ public sealed class StubHttpClientFactory : IHttpClientFactory
 public sealed class FakePostAnalysisCacheService : IPostAnalysisCacheService
 {
     private readonly Dictionary<string, PostAnalysisResult> _entries = new();
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<PostAnalysisResult>> _inflight = new();
+    private readonly SemaphoreSlim _analyzeTurn = new(1, 1);
 
     public int StoreCallCount { get; private set; }
 
@@ -100,33 +99,11 @@ public sealed class FakePostAnalysisCacheService : IPostAnalysisCacheService
         return Task.CompletedTask;
     }
 
-    public bool TryRegisterInflight(string postHash, out Task<PostAnalysisResult> task)
-    {
-        var tcs = new TaskCompletionSource<PostAnalysisResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (_inflight.TryAdd(postHash, tcs))
-        {
-            task = tcs.Task;
-            return true;
-        }
+    public Task WaitForAnalyzeTurnAsync(CancellationToken ct = default)
+        => _analyzeTurn.WaitAsync(ct);
 
-        task = _inflight[postHash].Task;
-        return false;
-    }
-
-    public void CompleteInflight(string postHash, PostAnalysisResult result)
-    {
-        if (_inflight.TryRemove(postHash, out var tcs))
-            tcs.TrySetResult(result);
-    }
-
-    public void FailInflight(IReadOnlyList<string> postHashes)
-    {
-        foreach (var hash in postHashes)
-        {
-            if (_inflight.TryRemove(hash, out var tcs))
-                tcs.TrySetException(new InvalidOperationException("The in-flight post analysis failed."));
-        }
-    }
+    public void ReleaseAnalyzeTurn()
+        => _analyzeTurn.Release();
 }
 
 /// <summary>
