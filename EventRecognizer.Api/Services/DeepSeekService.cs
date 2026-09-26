@@ -19,8 +19,10 @@ public class DeepSeekService : IDeepSeekService
     // A batch of ~57 posts overflowed the 4096-token output limit and DeepSeek cut the
     // JSON mid-string ("Expected end of string, but instead reached end of data").
     // Process posts in small chunks so each response fits comfortably in the token budget.
-    // The extraction chunk only holds posts the filter already marked as events.
-    private const int PostsPerChunk = 30;
+    // The extraction chunk only holds posts the filter already marked as events. Chunks
+    // of 30 overflowed again with real data (every attempt truncated at 4096 output
+    // tokens, and truncated responses are still billed in full): 20 is the proven size.
+    private const int PostsPerChunk = 20;
 
     // The phase-1 filter returns one boolean per post, so far larger chunks fit.
     private const int FilterPostsPerChunk = 60;
@@ -89,6 +91,9 @@ public class DeepSeekService : IDeepSeekService
         }
 
         // Phase 2: full extraction only for the posts the filter marked as events.
+        // Chunks that keep overflowing the output token limit (truncated responses
+        // are still billed in full, so re-sending the same chunk is money wasted)
+        // are split in halves and retried instead.
         var eventIndexes = new List<int>();
         for (var i = 0; i < results.Length; i++)
         {
@@ -96,26 +101,46 @@ public class DeepSeekService : IDeepSeekService
                 eventIndexes.Add(i);
         }
 
-        var extractTotalChunks = (int)Math.Ceiling(eventIndexes.Count / (double)PostsPerChunk);
+        var extractCall = 0;
+        var pending = new Queue<List<int>>();
         for (var offset = 0; offset < eventIndexes.Count; offset += PostsPerChunk)
         {
-            var indexChunk = eventIndexes.GetRange(offset, Math.Min(PostsPerChunk, eventIndexes.Count - offset));
-            var chunk = indexChunk.Select(i => posts[i]).ToList();
-            var chunkNumber = offset / PostsPerChunk + 1;
+            pending.Enqueue(eventIndexes.GetRange(offset, Math.Min(PostsPerChunk, eventIndexes.Count - offset)));
+        }
+        while (pending.Count > 0)
+        {
+            var indexChunk = pending.Dequeue();
+            if (indexChunk.Count == 0)
+                continue;
 
+            var chunk = indexChunk.Select(i => posts[i]).ToList();
+            extractCall++;
             var details = await SendChatWithRetriesAsync(
                 "analyze_posts_extract",
-                $"chunk {chunkNumber}/{extractTotalChunks}: {chunk.Count} event posts",
+                $"chunk {extractCall}: {chunk.Count} event posts",
                 BuildSystemPrompt(), BuildUserPrompt(chunk, dateRange), apiKey, maxTokens: 4096,
                 ParseBatchAnalysis, ct);
             if (details == null)
             {
-                // Exhausted all attempts: fail gracefully and treat the chunk as
-                // non-events instead of failing the whole request.
+                if (indexChunk.Count > 1)
+                {
+                    // Truncated again and again: split the chunk and retry the halves
+                    // instead of burning more attempts on the same oversized input.
+                    _logger.LogWarning(
+                        "DeepSeek failed to extract {Count} event posts after {MaxAttempts} attempts; splitting the chunk",
+                        chunk.Count, MaxAttempts);
+                    var half = indexChunk.Count / 2;
+                    pending.Enqueue(indexChunk.Take(half).ToList());
+                    pending.Enqueue(indexChunk.Skip(half).ToList());
+                    continue;
+                }
+
+                // A single post that still fails: give up and return it as non-event.
                 _logger.LogError(
-                    "DeepSeek failed to extract {Count} event posts after {MaxAttempts} attempts; returning them as non-events",
-                    chunk.Count, MaxAttempts);
-                details = chunk.Select(_ => new PostAnalysisResult { IsEvent = false }).ToList();
+                    "DeepSeek failed to extract one event post after {MaxAttempts} attempts; returning it as non-event",
+                    MaxAttempts);
+                results[indexChunk[0]] = new PostAnalysisResult { IsEvent = false };
+                continue;
             }
 
             // Pad with non-events if the LLM returned fewer results than requested
@@ -650,7 +675,7 @@ public class DeepSeekService : IDeepSeekService
             1. **title** (string | null): título del evento.
             2. **event_date** (string | null): fecha y hora en formato ISO 8601 (YYYY-MM-DDTHH:mm:ss). null si no se puede determinar una fecha concreta.
             3. **event_date_description** (string | null): descripción textual de la fecha ("Todos los jueves", "Sábado 19 de septiembre de 2026", "Del 14 al 17 de septiembre"). null si no aplica.
-            4. **summary** (string | null): resumen breve en español (máx. 2 frases) describiendo el evento.
+            4. **summary** (string | null): resumen MUY breve en español (máx. 20 palabras) describiendo el evento.
             5. **is_recurrent** (bool): true si el evento se repite en el tiempo (patrón semanal o varios días seguidos).
             6. **recurrence_type** (string | null): "weekly" (se repite por días de la semana) o "daily" (cada día dentro de un rango de fechas). null si no es recurrente.
             7. **recurrence_days_of_week** (array | null): días de repetición, 1=lunes...7=domingo. "De lunes a jueves" → [1,2,3,4]. "Todos los jueves" → [4].

@@ -112,17 +112,19 @@ public class DeepSeekServiceTests
     {
         var posts = CreatePosts(45);
         _handler.Enqueue(RespondWithIndexedResults); // filter: one call for all 45 posts
-        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 1: 30 posts
-        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 2: 15 posts
+        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 1: 20 posts
+        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 2: 20 posts
+        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 3: 5 posts
 
         var results = await _service.AnalyzePostsAsync(posts, "key");
 
         Assert.Equal(posts.Count, results.Count);
-        // Filter (45 in one chunk of 60) + extraction (30 + 15 per chunk).
-        Assert.Equal(3, _handler.Requests.Count);
+        // Filter (45 in one chunk of 60) + extraction (20 + 20 + 5 per chunk).
+        Assert.Equal(4, _handler.Requests.Count);
         Assert.Equal(45, CountPostsInBody(_handler.RequestBodies[0]));
-        Assert.Equal(30, CountPostsInBody(_handler.RequestBodies[1]));
-        Assert.Equal(15, CountPostsInBody(_handler.RequestBodies[2]));
+        Assert.Equal(20, CountPostsInBody(_handler.RequestBodies[1]));
+        Assert.Equal(20, CountPostsInBody(_handler.RequestBodies[2]));
+        Assert.Equal(5, CountPostsInBody(_handler.RequestBodies[3]));
 
         for (var i = 0; i < posts.Count; i++)
         {
@@ -234,25 +236,43 @@ public class DeepSeekServiceTests
     }
 
     [Fact]
-    public async Task AnalyzePostsAsync_WithOneChunkFailing_ReturnsNonEventsForThatChunkOnly()
+    public async Task AnalyzePostsAsync_WithTruncatedChunk_SplitsAndRecovers()
     {
-        var posts = CreatePosts(35); // extraction: 30 + 5
+        var posts = CreatePosts(25); // extraction: 20 + 5
         _handler.Enqueue(RespondWithIndexedResults); // filter: all events
-        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 1 (30) succeeds
-        for (var i = 0; i < 3; i++)
-            _handler.Enqueue(HttpStatusCode.OK, "not json"); // chunk 2 (5) exhausts retries
+        _handler.Enqueue(RespondWithIndexedResults); // extraction chunk 1 (20) succeeds
+        for (var i = 0; i < 3; i++) // chunk 2 (5) overflows the token limit every time
+            _handler.Enqueue(HttpStatusCode.OK,
+                TestData.BuildDeepSeekResponse(new List<PostAnalysisResult>(), finishReason: "length"));
+        _handler.Enqueue(RespondWithIndexedResults); // split half A (3) succeeds
+        _handler.Enqueue(RespondWithIndexedResults); // split half B (2) succeeds
 
         var results = await _service.AnalyzePostsAsync(posts, "key");
 
         Assert.Equal(posts.Count, results.Count);
-        Assert.Equal(5, _handler.Requests.Count);
+        // 1 filter + 1 first chunk + 3 truncated attempts + 2 split halves.
+        Assert.Equal(7, _handler.Requests.Count);
 
-        for (var i = 0; i < 30; i++)
+        for (var i = 0; i < posts.Count; i++)
         {
             Assert.True(results[i].IsEvent);
             Assert.Equal($"title-{i}", results[i].Title);
         }
-        Assert.All(results.Skip(30), r => Assert.False(r.IsEvent));
+    }
+
+    [Fact]
+    public async Task AnalyzePostsAsync_WithSingleEventPostExhaustingAttempts_ReturnsItAsNonEvent()
+    {
+        var posts = CreatePosts(1);
+        _handler.Enqueue((_, _) => OkAllEventsFilter(posts.Count));
+        for (var i = 0; i < 3; i++)
+            _handler.Enqueue(HttpStatusCode.OK, "not json");
+
+        var results = await _service.AnalyzePostsAsync(posts, "key");
+
+        // The chunk cannot be split any further: give up and return the post as non-event.
+        Assert.Equal(4, _handler.Requests.Count);
+        Assert.False(Assert.Single(results).IsEvent);
     }
 
     [Fact]
