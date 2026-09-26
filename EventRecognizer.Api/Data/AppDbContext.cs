@@ -17,7 +17,7 @@ public class AppDbContext : DbContext
 
     public DbSet<DeepSeekCallLog> DeepSeekCallLogs => Set<DeepSeekCallLog>();
 
-    public DbSet<PostAnalysisCache> PostAnalysisCaches => Set<PostAnalysisCache>();
+    public DbSet<PostRecord> Posts => Set<PostRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -63,9 +63,9 @@ public class AppDbContext : DbContext
             entity.HasIndex(e => e.Operation);
         });
 
-        modelBuilder.Entity<PostAnalysisCache>(entity =>
+        modelBuilder.Entity<PostRecord>(entity =>
         {
-            entity.HasIndex(e => e.PostHash)
+            entity.HasIndex(e => e.Url)
                   .IsUnique();
         });
     }

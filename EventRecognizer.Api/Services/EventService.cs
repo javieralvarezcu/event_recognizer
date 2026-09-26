@@ -14,20 +14,20 @@ public class EventService : IEventService
 
     private readonly IDeepSeekService _deepSeekService;
     private readonly IMuxoScraperService _muxoScraperService;
-    private readonly IPostAnalysisCacheService _postAnalysisCache;
+    private readonly IPostRegistryService _postRegistry;
     private readonly AppDbContext _dbContext;
     private readonly ILogger<EventService> _logger;
 
     public EventService(
         IDeepSeekService deepSeekService,
         IMuxoScraperService muxoScraperService,
-        IPostAnalysisCacheService postAnalysisCache,
+        IPostRegistryService postRegistry,
         AppDbContext dbContext,
         ILogger<EventService> logger)
     {
         _deepSeekService = deepSeekService;
         _muxoScraperService = muxoScraperService;
-        _postAnalysisCache = postAnalysisCache;
+        _postRegistry = postRegistry;
         _dbContext = dbContext;
         _logger = logger;
     }
@@ -151,9 +151,10 @@ public class EventService : IEventService
             DateRange? dateRange,
             CancellationToken ct)
     {
-        // 1. Resolve the analysis of every post: cached when the post (with the
-        //    requested range) was already analyzed, fresh LLM analysis otherwise.
-        var analyses = await AnalyzePostsWithCacheAsync(posts, deepSeekApiKey, dateRange, ct);
+        // 1. Resolve the analysis of every post: registry lookup by URL for the
+        //    already-analyzed ones (events and non-events), fresh LLM analysis only
+        //    for URLs the system has never seen.
+        var analyses = await AnalyzePostsWithRegistryAsync(posts, deepSeekApiKey, dateRange, ct);
 
         // 2. Decide which posts are valid events for the requested date range. A post is
         //    valid when the LLM says it is an event AND, if a range was requested, the
@@ -184,80 +185,87 @@ public class EventService : IEventService
     }
 
     /// <summary>
-    /// Analyzes posts skipping the LLM for the ones whose content hash is already in
-    /// the analysis cache (whether they were events or not), and stores the fresh
-    /// results so repeated submissions of the same dataset do not burn tokens on
-    /// re-analysis. Cache failures degrade to plain analysis.
+    /// Resolves the analysis of every post through the post registry: posts whose
+    /// URL is already in the registry with a stored analysis — events and non-events
+    /// alike — skip the LLM entirely. Only URLs the system has never analyzed are
+    /// registered and sent to the LLM. Concurrent runs serialize the analysis phase,
+    /// so only the first one pays for new posts and the rest find them stored.
     /// </summary>
-    private async Task<List<PostAnalysisResult>> AnalyzePostsWithCacheAsync(
+    private async Task<List<PostAnalysisResult>> AnalyzePostsWithRegistryAsync(
         List<InstagramPost> posts,
         string deepSeekApiKey,
         DateRange? dateRange,
         CancellationToken ct)
     {
-        var hashes = posts.Select(p => PostAnalysisCacheService.ComputePostHash(p, dateRange)).ToList();
-        var cached = await _postAnalysisCache.GetCachedAsync(hashes, ct);
+        var urls = posts.Select(p => p.Url).ToList();
+        var known = await _postRegistry.GetAnalysesByUrlAsync(urls, ct);
 
         var analyses = new PostAnalysisResult[posts.Count];
-        var allHits = cached.Count == posts.Count;
+        var fresh = new List<int>();
         for (var i = 0; i < posts.Count; i++)
         {
-            if (cached.TryGetValue(hashes[i], out var analysis))
+            if (known.TryGetValue(posts[i].Url, out var analysis))
                 analyses[i] = analysis;
+            else
+                fresh.Add(i);
         }
 
-        if (allHits)
+        if (fresh.Count == 0)
         {
-            _logger.LogInformation("Post analysis cache hit for all {Count} posts", posts.Count);
+            _logger.LogInformation("All {Count} posts already known; no LLM calls", posts.Count);
             return analyses.ToList();
         }
 
-        // Serialize the miss-analysis phase: concurrent identical runs queue here.
-        // The run holding the turn analyzes and stores; each queued run re-checks
-        // the cache after acquiring and finds everything stored, paying nothing.
-        // Serializing (instead of per-hash sharing) cannot deadlock.
-        await _postAnalysisCache.WaitForAnalyzeTurnAsync(ct);
+        await _postRegistry.WaitForAnalyzeTurnAsync(ct);
         try
         {
-            cached = await _postAnalysisCache.GetCachedAsync(hashes, ct);
+            // Another run may have analyzed these URLs while we were waiting.
+            known = await _postRegistry.GetAnalysesByUrlAsync(urls, ct);
 
-            var misses = new List<int>();
+            var toAnalyze = new List<int>();
             for (var i = 0; i < posts.Count; i++)
             {
-                if (cached.TryGetValue(hashes[i], out var analysis))
+                if (known.TryGetValue(posts[i].Url, out var analysis))
                     analyses[i] = analysis;
                 else
-                    misses.Add(i);
+                    toAnalyze.Add(i);
             }
 
-            if (misses.Count == 0)
+            if (toAnalyze.Count == 0)
             {
-                _logger.LogInformation("Post analysis cache hit for all {Count} posts after waiting", posts.Count);
+                _logger.LogInformation("All {Count} posts already known after waiting; no LLM calls", posts.Count);
                 return analyses.ToList();
             }
 
-            if (misses.Count < posts.Count)
-                _logger.LogInformation("Post analysis cache hit for {Hits}/{Total} posts",
-                    posts.Count - misses.Count, posts.Count);
+            if (toAnalyze.Count < posts.Count)
+                _logger.LogInformation("{New} new posts to analyze ({Known} already known)",
+                    toAnalyze.Count, posts.Count - toAnalyze.Count);
 
-            var fresh = await _deepSeekService.AnalyzePostsAsync(
-                misses.Select(i => posts[i]).ToList(), deepSeekApiKey, dateRange, ct);
+            // Register the new posts first (rows with a null analysis), then analyze.
+            // Rows left unanalyzed by a failure are picked up by the next request.
+            await _postRegistry.RegisterPostsAsync(
+                toAnalyze.Select(i => posts[i]).ToList(), ct);
 
-            var entries = new List<(string PostHash, string PostId, PostAnalysisResult Analysis)>(misses.Count);
-            for (var j = 0; j < misses.Count; j++)
+            var freshAnalyses = await _deepSeekService.AnalyzePostsAsync(
+                toAnalyze.Select(i => posts[i]).ToList(), deepSeekApiKey, dateRange, ct);
+
+            var entries = new List<(string Url, PostAnalysisResult Analysis)>(toAnalyze.Count);
+            for (var j = 0; j < toAnalyze.Count; j++)
             {
-                var index = misses[j];
-                var analysis = j < fresh.Count ? fresh[j] : new PostAnalysisResult { IsEvent = false };
+                var index = toAnalyze[j];
+                var analysis = j < freshAnalyses.Count
+                    ? freshAnalyses[j]
+                    : new PostAnalysisResult { IsEvent = false };
                 analyses[index] = analysis;
-                entries.Add((hashes[index], posts[index].PostId, analysis));
+                entries.Add((posts[index].Url, analysis));
             }
 
-            await _postAnalysisCache.StoreAsync(entries, ct);
+            await _postRegistry.StoreAnalysesAsync(entries, ct);
             return analyses.ToList();
         }
         finally
         {
-            _postAnalysisCache.ReleaseAnalyzeTurn();
+            _postRegistry.ReleaseAnalyzeTurn();
         }
     }
 

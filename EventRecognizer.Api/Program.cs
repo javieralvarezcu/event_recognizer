@@ -37,8 +37,8 @@ builder.Services.AddHttpClient("MuxoJaleo", client =>
 // --- App Services ---
 builder.Services.AddScoped<IDeepSeekService, DeepSeekService>();
 builder.Services.AddScoped<IDeepSeekAuditService, DeepSeekAuditService>();
-// Singleton: holds the process-wide in-flight dedup registry.
-builder.Services.AddSingleton<IPostAnalysisCacheService, PostAnalysisCacheService>();
+// Singleton: holds the process-wide analysis turn.
+builder.Services.AddSingleton<IPostRegistryService, PostRegistryService>();
 builder.Services.AddScoped<IMuxoScraperService, MuxoScraperService>();
 builder.Services.AddScoped<IEventService, EventService>();
 

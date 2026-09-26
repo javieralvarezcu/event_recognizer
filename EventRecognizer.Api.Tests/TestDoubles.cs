@@ -57,43 +57,49 @@ public sealed class StubHttpClientFactory : IHttpClientFactory
 }
 
 /// <summary>
-/// In-memory IPostAnalysisCacheService: seeded entries are hits, everything else is a
-/// miss; stores into itself so a second run reuses what the first run cached.
+/// In-memory IPostRegistryService: seeded URLs are known posts (no LLM), everything
+/// else is unknown; stores into itself so a second run reuses what the first stored.
+/// The analyze turn is a real semaphore so concurrency tests exercise the serialization.
 /// </summary>
-public sealed class FakePostAnalysisCacheService : IPostAnalysisCacheService
+public sealed class FakePostRegistryService : IPostRegistryService
 {
-    private readonly Dictionary<string, PostAnalysisResult> _entries = new();
+    private readonly Dictionary<string, PostAnalysisResult> _analyses = new();
     private readonly SemaphoreSlim _analyzeTurn = new(1, 1);
 
     public int StoreCallCount { get; private set; }
 
-    public List<string> StoredHashes { get; } = new();
+    public List<string> StoredUrls { get; } = new();
 
-    public void Seed(string postHash, PostAnalysisResult analysis) => _entries[postHash] = analysis;
+    public void Seed(string url, PostAnalysisResult analysis) => _analyses[url] = analysis;
 
-    public Task<Dictionary<string, PostAnalysisResult>> GetCachedAsync(
-        IReadOnlyList<string> postHashes,
+    public Task<Dictionary<string, PostAnalysisResult>> GetAnalysesByUrlAsync(
+        IReadOnlyList<string> urls,
         CancellationToken ct = default)
     {
         var hits = new Dictionary<string, PostAnalysisResult>();
-        foreach (var hash in postHashes)
+        foreach (var url in urls)
         {
-            if (_entries.TryGetValue(hash, out var analysis))
-                hits[hash] = analysis;
+            if (_analyses.TryGetValue(url, out var analysis))
+                hits[url] = analysis;
         }
 
         return Task.FromResult(hits);
     }
 
-    public Task StoreAsync(
-        IReadOnlyList<(string PostHash, string PostId, PostAnalysisResult Analysis)> entries,
+    public Task RegisterPostsAsync(
+        IReadOnlyList<InstagramPost> posts,
+        CancellationToken ct = default)
+        => Task.CompletedTask;
+
+    public Task StoreAnalysesAsync(
+        IReadOnlyList<(string Url, PostAnalysisResult Analysis)> entries,
         CancellationToken ct = default)
     {
         StoreCallCount++;
-        foreach (var (hash, _, analysis) in entries)
+        foreach (var (url, analysis) in entries)
         {
-            _entries[hash] = analysis;
-            StoredHashes.Add(hash);
+            _analyses[url] = analysis;
+            StoredUrls.Add(url);
         }
 
         return Task.CompletedTask;

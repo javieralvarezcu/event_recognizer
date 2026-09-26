@@ -17,11 +17,11 @@ public class EventServiceTests
         Func<int, List<MuxoEvent>>? scrape = null,
         Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? findCrossMatches = null,
         Func<List<CleanupEventItem>, List<CleanupEventItem>, List<DuplicateGroupResult>>? findDuplicateCandidates = null,
-        FakePostAnalysisCacheService? cache = null)
+        FakePostRegistryService? registry = null)
         => new(
             new FakeDeepSeekService(analyze, findDuplicates, findDuplicateCandidates, findCrossMatches),
             new FakeMuxoScraperService(scrape ?? (_ => new List<MuxoEvent>())),
-            cache ?? new FakePostAnalysisCacheService(),
+            registry ?? new FakePostRegistryService(),
             db,
             NullLogger<EventService>.Instance);
 
@@ -1115,7 +1115,7 @@ public class EventServiceTests
             TestData.NonEventResult()
         });
         var service = new EventService(fake, new FakeMuxoScraperService(_ => new List<MuxoEvent>()),
-            new FakePostAnalysisCacheService(), fixture.Db, NullLogger<EventService>.Instance);
+            new FakePostRegistryService(), fixture.Db, NullLogger<EventService>.Instance);
         var range = Range("2026-09-01", "2026-09-30");
 
         await service.RecognizeEventsAsync(
@@ -1304,36 +1304,57 @@ public class EventServiceTests
     }
 
     [Fact]
-    public async Task RecognizeEventsAsync_WithCachedAnalyses_SkipsTheLlm()
+    public async Task RecognizeEventsAsync_WithKnownEventPost_SkipsTheLlm()
     {
         using var fixture = new TestDatabase();
         var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
 
-        var cache = new FakePostAnalysisCacheService();
-        cache.Seed(PostAnalysisCacheService.ComputePostHash(posts[0], null),
+        var registry = new FakePostRegistryService();
+        registry.Seed(posts[0].Url,
             TestData.EventResult("Concierto X", "2026-09-19T22:00:00", "Sábado 19", "Resumen X"));
 
-        // The LLM must not be called for cached posts.
+        // The LLM must not be called for posts already in the registry.
         var service = CreateService(fixture.Db,
-            (_, _) => throw new InvalidOperationException("The LLM must not be called for cached posts"),
-            cache: cache);
+            (_, _) => throw new InvalidOperationException("The LLM must not be called for known posts"),
+            registry: registry);
 
         var response = await service.RecognizeEventsAsync(posts, "key");
 
         Assert.Equal(1, response.EventsFound);
         Assert.Equal("Concierto X", response.Events[0].Title);
         Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
-        Assert.Equal(0, cache.StoreCallCount);
+        Assert.Equal(0, registry.StoreCallCount);
     }
 
     [Fact]
-    public async Task RecognizeEventsAsync_AnalyzesMisses_StoresThemAndReusesOnSecondRun()
+    public async Task RecognizeEventsAsync_WithKnownNonEventPost_SkipsTheLlm()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1", "foto random") };
+
+        var registry = new FakePostRegistryService();
+        registry.Seed(posts[0].Url, TestData.NonEventResult());
+
+        // Non-events stay in the registry too: they are never analyzed again.
+        var service = CreateService(fixture.Db,
+            (_, _) => throw new InvalidOperationException("The LLM must not be called for known posts"),
+            registry: registry);
+
+        var response = await service.RecognizeEventsAsync(posts, "key");
+
+        Assert.Equal(0, response.EventsFound);
+        Assert.False(response.Events[0].IsEvent);
+        Assert.Equal(0, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_AnalyzesUnknownPosts_StoresThemAndReusesOnSecondRun()
     {
         using var fixture = new TestDatabase();
         var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
 
         var analyzeCalls = 0;
-        var cache = new FakePostAnalysisCacheService();
+        var registry = new FakePostRegistryService();
         var service = CreateService(fixture.Db, (_, _) =>
         {
             analyzeCalls++;
@@ -1341,29 +1362,28 @@ public class EventServiceTests
             {
                 TestData.EventResult("Concierto X", "2026-09-19T22:00:00", "Sábado 19", "Resumen X")
             };
-        }, cache: cache);
+        }, registry: registry);
 
         await service.RecognizeEventsAsync(posts, "key");
         await service.RecognizeEventsAsync(posts, "key");
 
-        // First run analyzes and caches; the second run is served from the cache.
+        // First run analyzes and stores; the second run is served from the registry.
         Assert.Equal(1, analyzeCalls);
-        Assert.Equal(1, cache.StoreCallCount);
-        Assert.Contains(PostAnalysisCacheService.ComputePostHash(posts[0], null), cache.StoredHashes);
+        Assert.Equal(1, registry.StoreCallCount);
+        Assert.Contains(posts[0].Url, registry.StoredUrls);
         Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
     }
 
     [Fact]
-    public async Task RecognizeEventsAsync_CacheEntryForAnotherRange_IsNotReused()
+    public async Task RecognizeEventsAsync_KnownPostWithAnotherRange_IsReused()
     {
         using var fixture = new TestDatabase();
         var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
 
-        // The range influences how relative dates are resolved, so the cached
-        // analysis of one range must not serve a request with another range.
-        var rangeA = new DateRange(new DateTime(2026, 9, 1), new DateTime(2026, 9, 30));
-        var cache = new FakePostAnalysisCacheService();
-        cache.Seed(PostAnalysisCacheService.ComputePostHash(posts[0], rangeA),
+        // The registry is keyed by URL: a known post is reused no matter the range
+        // (the range filter still applies to the stored analysis at response time).
+        var registry = new FakePostRegistryService();
+        registry.Seed(posts[0].Url,
             TestData.EventResult("Concierto X", "2026-09-19T22:00:00", "Sábado 19", "Resumen X"));
 
         var analyzeCalls = 0;
@@ -1371,12 +1391,14 @@ public class EventServiceTests
         {
             analyzeCalls++;
             return new List<PostAnalysisResult> { TestData.NonEventResult() };
-        }, cache: cache);
+        }, registry: registry);
 
-        var rangeB = new DateRange(new DateTime(2026, 10, 1), new DateTime(2026, 10, 31));
-        await service.RecognizeEventsAsync(posts, "key", rangeB);
+        var range = new DateRange(new DateTime(2026, 9, 1), new DateTime(2026, 9, 30));
+        var response = await service.RecognizeEventsAsync(posts, "key", range);
 
-        Assert.Equal(1, analyzeCalls);
+        Assert.Equal(0, analyzeCalls);
+        Assert.Equal(1, response.EventsFound);
+        Assert.Equal("Concierto X", response.Events[0].Title);
     }
 
     [Fact]
@@ -1393,42 +1415,28 @@ public class EventServiceTests
         var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
 
         var analyzeCalls = 0;
-        var cache = new FakePostAnalysisCacheService();
+        var registry = new FakePostRegistryService();
         Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze = (_, _) =>
         {
             Interlocked.Increment(ref analyzeCalls);
-            Thread.Sleep(200); // let the other run reach the in-flight registry
+            Thread.Sleep(200); // let the other run queue on the analyze turn
             return new List<PostAnalysisResult>
             {
                 TestData.EventResult("Concierto X", "2026-09-19T22:00:00", "Sábado 19", "Resumen X")
             };
         };
 
-        var serviceA = CreateService(fixture.Db, analyze, cache: cache);
-        var serviceB = CreateService(db2, analyze, cache: cache);
+        var serviceA = CreateService(fixture.Db, analyze, registry: registry);
+        var serviceB = CreateService(db2, analyze, registry: registry);
 
-        // Two identical runs fired at the same time: the second one awaits the
-        // first's analysis instead of paying its own DeepSeek call.
+        // Two identical runs fired at the same time: the second one waits its turn,
+        // re-checks the registry and finds the stored analysis without paying a call.
         var runA = serviceA.RecognizeEventsAsync(posts, "key");
         var runB = serviceB.RecognizeEventsAsync(posts, "key");
         await Task.WhenAll(runA, runB);
 
         Assert.Equal(1, analyzeCalls);
-        Assert.Equal(1, cache.StoreCallCount);
+        Assert.Equal(1, registry.StoreCallCount);
         Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
-    }
-
-    [Fact]
-    public void ComputePostHash_NormalizesTheRangeToDayGranularity()
-    {
-        var post = TestData.CreatePost("p1", "cartel de concierto");
-        var rangeA = new DateRange(new DateTime(2026, 9, 1, 8, 30, 0), new DateTime(2026, 9, 30, 23, 59, 59));
-        var rangeB = new DateRange(new DateTime(2026, 9, 1, 0, 0, 0), new DateTime(2026, 9, 30, 0, 0, 0));
-
-        // A range that only differs in the time of day resolves to the same prompt
-        // (the LLM only sees yyyy-MM-dd), so it must hit the same cache entry.
-        Assert.Equal(
-            PostAnalysisCacheService.ComputePostHash(post, rangeA),
-            PostAnalysisCacheService.ComputePostHash(post, rangeB));
     }
 }

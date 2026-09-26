@@ -30,7 +30,7 @@ Event Recognizer es una API REST que analiza publicaciones de Instagram y detect
 El flujo de reconocimiento:
 
 1. El cliente envía un lote de posts de Instagram a `POST /api/events/recognize` junto con su API key de DeepSeek y, opcionalmente, un rango de fechas (`dateFrom`/`dateTo`).
-2. Los posts cuyo hash de contenido (cuenta + caption + fecha + url + rango) ya está en la caché de análisis se sirven de ella **sin llamar al LLM**; solo los nuevos se analizan.
+2. Todo post se registra en la tabla `Posts` por su URL. Los posts cuya URL ya tiene análisis guardado — sean eventos o no-eventos — se sirven de él **sin llamar al LLM**; solo las URLs desconocidas se analizan y guardan.
 3. El análisis es en dos fases: un **filtro barato** (`is_event`) para todos los posts nuevos y la **extracción completa** (título, fecha, resumen, recurrencia) solo para los que son eventos.
 4. El servidor formatea los posts y los envía a DeepSeek con un prompt en español (incluye el rango solicitado como contexto y exige resolver fechas aproximadas o de eventos con nombre propio).
 5. DeepSeek analiza cada post y devuelve un JSON estructurado indicando si es evento, título, fecha, resumen y patrón de recurrencia (semanal o rango de días).
@@ -633,24 +633,30 @@ adicional. **La API key nunca se guarda.**
 | `StartedAtUtc` | `datetime2` | NOT NULL, INDEX | Instante UTC exacto en que se envió el request |
 | `CompletedAtUtc` | `datetime2` | NOT NULL | Instante UTC exacto en que terminó el intercambio |
 
-### Tabla `PostAnalysisCaches` (caché de análisis de posts)
+### Tabla `Posts` (registro de posts recibidos)
 
-Caché del análisis del LLM por post, clave por el hash del contenido (cuenta + caption
-+ fecha de publicación + url + rango solicitado, con el rango normalizado a día).
-Los posts ya analizados — sean eventos o no — **no se vuelven a mandar al LLM** en
-ejecuciones repetidas; solo los posts nuevos pagan tokens. Las ejecuciones idénticas
-**concurrentes** se serializan en la fase de análisis (turno único): la primera paga
-la llamada y las demás la encuentran en caché al re-comprobar, y un semáforo global
-limita a 2 las peticiones HTTP simultáneas a DeepSeek para respetar sus rate limits.
-Un fallo de caché degrada a análisis normal.
+Todo post que llega por los endpoints de reconocimiento queda registrado por su URL,
+junto con el veredicto del análisis una vez conocido. Los posts ya analizados — sean
+**eventos o no-eventos** — no vuelven a pasar por el LLM: solo las URLs desconocidas
+se analizan y guardan. Las ejecuciones idénticas **concurrentes** se serializan en la
+fase de análisis (turno único): la primera paga la llamada y las demás lo encuentran
+registrado al re-comprobar. Un semáforo global limita a 2 las peticiones HTTP
+simultáneas a DeepSeek para respetar sus rate limits. Un fallo del registro degrada a
+análisis normal.
 
 | Columna | Tipo | Restricciones | Descripción |
 |---|---|---|---|
 | `Id` | `int` | PK, IDENTITY | Clave primaria autoincremental |
-| `PostHash` | `nvarchar(64)` | NOT NULL, UNIQUE | SHA-256 en hex del fingerprint del post + rango |
-| `PostId` | `nvarchar(100)` | NOT NULL | PostId del post analizado (diagnóstico) |
-| `AnalysisJson` | `nvarchar(max)` | NOT NULL | `PostAnalysisResult` serializado |
-| `CreatedAt` | `datetime2` | NOT NULL | Fecha de creación del registro |
+| `Url` | `nvarchar(500)` | NOT NULL, UNIQUE | URL del post — identidad del post en el registro |
+| `Account` | `nvarchar(200)` | NOT NULL | Usuario de Instagram |
+| `PostId` | `nvarchar(100)` | NOT NULL | ID del post de Instagram |
+| `Caption` | `nvarchar(4000)` | NOT NULL | Caption del post |
+| `PostDatetime` | `datetime2` | NULL | Fecha de publicación del post |
+| `ImageUrl` | `nvarchar(1000)` | NULL | URL de la imagen del post |
+| `IsEvent` | `bit` | NOT NULL | Si el post fue analizado como evento (solo válido con `AnalysisJson` informado) |
+| `AnalysisJson` | `nvarchar(max)` | NULL | `PostAnalysisResult` serializado. NULL hasta analizar; se re-analiza si sigue NULL |
+| `CreatedAtUtc` | `datetime2` | NOT NULL | Fecha de registro del post |
+| `AnalyzedAtUtc` | `datetime2` | NULL | Fecha en que se guardó el análisis |
 
 ---
 
