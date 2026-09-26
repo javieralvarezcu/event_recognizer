@@ -1378,4 +1378,57 @@ public class EventServiceTests
 
         Assert.Equal(1, analyzeCalls);
     }
+
+    [Fact]
+    public async Task RecognizeEventsAsync_ConcurrentIdenticalRuns_ShareOneAnalysis()
+    {
+        DbContextOptions<AppDbContext>? options = null;
+        using var fixture = new TestDatabase(o =>
+        {
+            options = o;
+            return new AppDbContext(o);
+        });
+        using var db2 = new AppDbContext(options!);
+
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
+
+        var analyzeCalls = 0;
+        var cache = new FakePostAnalysisCacheService();
+        Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze = (_, _) =>
+        {
+            Interlocked.Increment(ref analyzeCalls);
+            Thread.Sleep(200); // let the other run reach the in-flight registry
+            return new List<PostAnalysisResult>
+            {
+                TestData.EventResult("Concierto X", "2026-09-19T22:00:00", "Sábado 19", "Resumen X")
+            };
+        };
+
+        var serviceA = CreateService(fixture.Db, analyze, cache: cache);
+        var serviceB = CreateService(db2, analyze, cache: cache);
+
+        // Two identical runs fired at the same time: the second one awaits the
+        // first's analysis instead of paying its own DeepSeek call.
+        var runA = serviceA.RecognizeEventsAsync(posts, "key");
+        var runB = serviceB.RecognizeEventsAsync(posts, "key");
+        await Task.WhenAll(runA, runB);
+
+        Assert.Equal(1, analyzeCalls);
+        Assert.Equal(1, cache.StoreCallCount);
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public void ComputePostHash_NormalizesTheRangeToDayGranularity()
+    {
+        var post = TestData.CreatePost("p1", "cartel de concierto");
+        var rangeA = new DateRange(new DateTime(2026, 9, 1, 8, 30, 0), new DateTime(2026, 9, 30, 23, 59, 59));
+        var rangeB = new DateRange(new DateTime(2026, 9, 1, 0, 0, 0), new DateTime(2026, 9, 30, 0, 0, 0));
+
+        // A range that only differs in the time of day resolves to the same prompt
+        // (the LLM only sees yyyy-MM-dd), so it must hit the same cache entry.
+        Assert.Equal(
+            PostAnalysisCacheService.ComputePostHash(post, rangeA),
+            PostAnalysisCacheService.ComputePostHash(post, rangeB));
+    }
 }

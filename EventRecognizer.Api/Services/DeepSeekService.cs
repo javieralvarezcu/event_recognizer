@@ -26,6 +26,11 @@ public class DeepSeekService : IDeepSeekService
     private const int FilterPostsPerChunk = 60;
     private const int MaxAttempts = 3; // initial attempt + 2 retries
 
+    // DeepSeek rate limits are tight: never send more than a couple of HTTP requests
+    // at once, no matter how many runs are executing concurrently. Static so every
+    // scoped instance of the service shares the same gate.
+    private static readonly SemaphoreSlim RateLimitGate = new(2, 2);
+
     public DeepSeekService(
         IHttpClientFactory httpClientFactory,
         ILogger<DeepSeekService> logger,
@@ -519,9 +524,10 @@ public class DeepSeekService : IDeepSeekService
     /// <summary>Heuristic token estimate used when the API does not report usage: ~4 chars per token.</summary>
     private static int EstimateTokens(int charCount) => charCount / 4;
 
-    // Retry backoff between attempts. Virtual so tests can skip the delay.
+    // Retry backoff between attempts (2s, then 4s — enough for 429 rate limits to
+    // recover without hammering). Virtual so tests can skip the delay.
     protected virtual Task DelayBetweenRetriesAsync(int attempt, CancellationToken ct)
-        => Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+        => Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), ct);
 
     private static bool IsTransientHttpError(HttpRequestException ex) =>
         ex.StatusCode is HttpStatusCode.TooManyRequests
@@ -558,11 +564,23 @@ public class DeepSeekService : IDeepSeekService
         requestMessage.Headers.Add("Authorization", $"Bearer {apiKey}");
 
         var httpClient = _httpClientFactory.CreateClient("DeepSeek");
-        var response = await httpClient.SendAsync(requestMessage, ct);
-        response.EnsureSuccessStatusCode();
+        await RateLimitGate.WaitAsync(ct);
+        try
+        {
+            var response = await httpClient.SendAsync(requestMessage, ct);
+            response.EnsureSuccessStatusCode();
 
-        var responseBody = await response.Content.ReadAsStringAsync(ct);
+            var responseBody = await response.Content.ReadAsStringAsync(ct);
+            return ParseDeepSeekResponse(responseBody);
+        }
+        finally
+        {
+            RateLimitGate.Release();
+        }
+    }
 
+    private DeepSeekHttpResult ParseDeepSeekResponse(string responseBody)
+    {
         DeepSeekResponse? deepSeekResponse;
         try
         {

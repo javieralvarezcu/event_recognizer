@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -12,6 +13,11 @@ public class PostAnalysisCacheService : IPostAnalysisCacheService
     private readonly IDbContextFactory<AppDbContext> _dbContextFactory;
     private readonly ILogger<PostAnalysisCacheService> _logger;
 
+    // Hashes currently being analyzed by some request: concurrent identical runs
+    // await the same analysis instead of each paying a DeepSeek call. Process-wide,
+    // so the service must be registered as a singleton.
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<PostAnalysisResult>> _inflight = new();
+
     public PostAnalysisCacheService(IDbContextFactory<AppDbContext> dbContextFactory, ILogger<PostAnalysisCacheService> logger)
     {
         _dbContextFactory = dbContextFactory;
@@ -21,7 +27,9 @@ public class PostAnalysisCacheService : IPostAnalysisCacheService
     /// <summary>
     /// Content fingerprint of one post for caching: the post itself plus the
     /// requested date range (the range influences how relative dates are resolved,
-    /// so a different range must not reuse a cached analysis).
+    /// so a different range must not reuse a cached analysis). Dates are normalized
+    /// to day granularity — the prompt only carries yyyy-MM-dd, so a range that
+    /// drifts within the same day must hit the same cache entry.
     /// </summary>
     public static string ComputePostHash(InstagramPost post, DateRange? dateRange)
     {
@@ -30,8 +38,36 @@ public class PostAnalysisCacheService : IPostAnalysisCacheService
         sb.Append(post.Caption).Append('\n');
         sb.Append(post.Datetime?.ToString("O")).Append('\n');
         sb.Append(post.Url).Append('\n');
-        sb.Append(dateRange?.From?.ToString("O")).Append('|').Append(dateRange?.To?.ToString("O"));
+        sb.Append(dateRange?.From?.Date.ToString("yyyy-MM-dd")).Append('|').Append(dateRange?.To?.Date.ToString("yyyy-MM-dd"));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+    }
+
+    public bool TryRegisterInflight(string postHash, out Task<PostAnalysisResult> task)
+    {
+        var tcs = new TaskCompletionSource<PostAnalysisResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (_inflight.TryAdd(postHash, tcs))
+        {
+            task = tcs.Task;
+            return true; // this caller owns the analysis of the hash
+        }
+
+        task = _inflight[postHash].Task;
+        return false; // another request is already analyzing it
+    }
+
+    public void CompleteInflight(string postHash, PostAnalysisResult result)
+    {
+        if (_inflight.TryRemove(postHash, out var tcs))
+            tcs.TrySetResult(result);
+    }
+
+    public void FailInflight(IReadOnlyList<string> postHashes)
+    {
+        foreach (var hash in postHashes)
+        {
+            if (_inflight.TryRemove(hash, out var tcs))
+                tcs.TrySetException(new InvalidOperationException("The in-flight post analysis failed."));
+        }
     }
 
     public async Task<Dictionary<string, PostAnalysisResult>> GetCachedAsync(
