@@ -36,6 +36,23 @@ public interface IDeepSeekService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Asks the LLM which of the newly recognized events (not persisted yet) are the
+    /// same real-world event as one already persisted, returning groups with the id
+    /// that stays and the ids that must not be saved. Groups may also contain only
+    /// new events, marking duplicates within the same batch.
+    /// </summary>
+    /// <param name="candidates">The newly recognized events, not persisted yet. Only
+    /// these ids and the existing ones may be referenced.</param>
+    /// <param name="existingEvents">The events already persisted in the database.</param>
+    /// <param name="apiKey">The DeepSeek API key provided by the client in the request header.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<List<DuplicateGroupResult>> FindDuplicateCandidatesAsync(
+        List<CleanupEventItem> candidates,
+        List<CleanupEventItem> existingEvents,
+        string apiKey,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Asks the LLM to cross-match our persisted events with the events of the
     /// muxojaleo.com calendar, returning the pairs that describe the same real event.
     /// </summary>

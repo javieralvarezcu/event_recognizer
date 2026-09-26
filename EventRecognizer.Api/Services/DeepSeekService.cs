@@ -115,6 +115,28 @@ public class DeepSeekService : IDeepSeekService
         }
     }
 
+    public async Task<List<DuplicateGroupResult>> FindDuplicateCandidatesAsync(
+        List<CleanupEventItem> candidates,
+        List<CleanupEventItem> existingEvents,
+        string apiKey,
+        CancellationToken ct = default)
+    {
+        // Nothing to compare: no candidates, or a single candidate with no existing
+        // events to compare it against (two or more candidates can still duplicate
+        // each other).
+        if (candidates.Count == 0 || (existingEvents.Count == 0 && candidates.Count < 2))
+            return new List<DuplicateGroupResult>();
+
+        var groups = await SendChatWithRetriesAsync(
+            BuildDedupCandidatesSystemPrompt(), BuildDedupCandidatesUserPrompt(candidates, existingEvents),
+            apiKey, maxTokens: 8192, ParseDuplicateCleanup, ct);
+        if (groups == null)
+            throw new InvalidOperationException(
+                $"The LLM failed to return a valid response for the duplicate check after {MaxAttempts} attempts.");
+
+        return groups;
+    }
+
     public async Task<List<CrossMatchResult>> FindCrossMatchesAsync(
         List<CleanupEventItem> ourEvents,
         List<MuxoEventItem> muxoEvents,
@@ -571,24 +593,88 @@ public class DeepSeekService : IDeepSeekService
         sb.AppendLine($"Mes que se está limpiando: {monthLabel} (los eventos con fecha de este mes y los eventos sin fecha).");
 
         foreach (var e in events)
-        {
-            sb.AppendLine();
-            sb.AppendLine($"--- EVENTO (ID: {e.EventUniqueId}) ---");
-            sb.AppendLine($"título: {TruncateForPrompt(e.Title, 200)}");
-            sb.AppendLine($"resumen: {TruncateForPrompt(e.Summary, 300)}");
-            sb.AppendLine($"fecha: {(e.EventDate?.ToString("yyyy-MM-dd") ?? "(SIN FECHA)")}");
-            sb.AppendLine($"descripción de fecha: {TruncateForPrompt(e.EventDateDescription, 200)}");
-            sb.AppendLine($"recurrente: {e.IsRecurrent}");
-            sb.AppendLine($"tipo de recurrencia: {e.RecurrenceType ?? "(ninguno)"}");
-            sb.AppendLine($"días de la semana: {(string.IsNullOrWhiteSpace(e.RecurrenceDaysOfWeek) ? "(ninguno)" : e.RecurrenceDaysOfWeek)}");
-            sb.AppendLine($"inicio recurrencia: {e.RecurrenceStartDate?.ToString("yyyy-MM-dd") ?? "(ninguno)"}");
-            sb.AppendLine($"fin recurrencia: {e.RecurrenceEndDate?.ToString("yyyy-MM-dd") ?? "(ninguno)"}");
-            sb.AppendLine($"cuenta: {TruncateForPrompt(e.Account, 100)}");
-            sb.AppendLine($"enlace: {e.Url ?? "(ninguno)"}");
-            sb.AppendLine($"caption: {TruncateForPrompt(e.Caption, 500)}");
-        }
+            AppendEventItem(sb, e, "EVENTO", noDateLabel: "SIN FECHA");
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Detects which newly recognized events are the same real event as one already
+    /// persisted (or as another new event of the same batch), so the duplicates are
+    /// not saved again. Same response contract as the cleanup duplicate detection.
+    /// </summary>
+    private static string BuildDedupCandidatesSystemPrompt()
+    {
+        return """
+            Eres un asistente especializado en detectar si un evento recién reconocido ya existe en el registro de eventos guardados.
+
+            Recibirás dos listas:
+            1. EVENTOS NUEVOS: eventos recién reconocidos en posts de Instagram que AÚN NO están guardados.
+            2. EVENTOS EXISTENTES: eventos ya guardados en la base de datos.
+
+            Tu tarea: identificar qué eventos NUEVOS son en realidad EL MISMO evento real que uno YA EXISTENTE (por ejemplo, la misma fiesta semanal anunciada cada semana desde la misma cuenta, o el mismo concierto publicado por la sala y por el artista). Esos eventos nuevos NO se guardarán: se conserva el evento existente.
+
+            REGLAS DE COMPARACIÓN (MUY IMPORTANTE):
+            - NO te fíes solo del título: los títulos los genera un LLM y pueden variar entre posts ("Fiesta jueves", "Jueves de fiesta", "Thursday party"). Compara el conjunto: cuenta/lugar, resumen, fecha o patrón de recurrencia, y texto del caption.
+            - Dos eventos son el mismo cuando coinciden el lugar/cuenta Y la fecha (o el mismo patrón de recurrencia, p. ej. ambos "todos los jueves" en la misma cuenta) aunque los títulos difieran.
+            - Si tienes dudas razonables de que sean el mismo evento, NO los agrupes. Ante la duda, conserva el evento nuevo.
+            - Un evento EXISTENTE nunca se marca como duplicado: si un grupo mezcla eventos nuevos y existentes, keep_event_id SIEMPRE es el ID del evento existente y duplicate_event_ids los eventos nuevos.
+            - Si dos eventos NUEVOS son duplicados entre sí y ninguno existe todavía, agrupa igualmente: keep_event_id será el evento nuevo más completo y duplicate_event_ids los demás.
+            - Solo puedes usar los IDs que aparecen en las listas. NUNCA inventes IDs.
+            - Un evento debe aparecer como máximo en un grupo.
+
+            Responde ÚNICAMENTE con un objeto JSON con esta estructura:
+            {
+              "duplicate_groups": [
+                {
+                  "keep_event_id": "ID del evento que se conserva",
+                  "duplicate_event_ids": ["ID del evento duplicado que no se guardará", "..."],
+                  "reason": "Motivo breve en español"
+                }
+              ]
+            }
+            Si no hay duplicados, devuelve { "duplicate_groups": [] }.
+            """;
+    }
+
+    private static string BuildDedupCandidatesUserPrompt(
+        List<CleanupEventItem> candidates,
+        List<CleanupEventItem> existingEvents)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Compara los eventos nuevos con los existentes y devuelve los grupos de duplicados.");
+        sb.AppendLine();
+        sb.AppendLine("EVENTOS NUEVOS (recién reconocidos, aún no guardados):");
+
+        foreach (var e in candidates)
+            AppendEventItem(sb, e, "EVENTO NUEVO", noDateLabel: "sin fecha");
+
+        sb.AppendLine();
+        sb.AppendLine("EVENTOS EXISTENTES (ya guardados):");
+
+        foreach (var e in existingEvents)
+            AppendEventItem(sb, e, "EVENTO EXISTENTE", noDateLabel: "sin fecha");
+
+        return sb.ToString();
+    }
+
+    /// <summary>Appends one event's fields to a duplicate-detection prompt.</summary>
+    private static void AppendEventItem(StringBuilder sb, CleanupEventItem e, string label, string noDateLabel)
+    {
+        sb.AppendLine();
+        sb.AppendLine($"--- {label} (ID: {e.EventUniqueId}) ---");
+        sb.AppendLine($"título: {TruncateForPrompt(e.Title, 200)}");
+        sb.AppendLine($"resumen: {TruncateForPrompt(e.Summary, 300)}");
+        sb.AppendLine($"fecha: {(e.EventDate?.ToString("yyyy-MM-dd") ?? $"({noDateLabel})")}");
+        sb.AppendLine($"descripción de fecha: {TruncateForPrompt(e.EventDateDescription, 200)}");
+        sb.AppendLine($"recurrente: {e.IsRecurrent}");
+        sb.AppendLine($"tipo de recurrencia: {e.RecurrenceType ?? "(ninguno)"}");
+        sb.AppendLine($"días de la semana: {(string.IsNullOrWhiteSpace(e.RecurrenceDaysOfWeek) ? "(ninguno)" : e.RecurrenceDaysOfWeek)}");
+        sb.AppendLine($"inicio recurrencia: {e.RecurrenceStartDate?.ToString("yyyy-MM-dd") ?? "(ninguno)"}");
+        sb.AppendLine($"fin recurrencia: {e.RecurrenceEndDate?.ToString("yyyy-MM-dd") ?? "(ninguno)"}");
+        sb.AppendLine($"cuenta: {TruncateForPrompt(e.Account, 100)}");
+        sb.AppendLine($"enlace: {e.Url ?? "(ninguno)"}");
+        sb.AppendLine($"caption: {TruncateForPrompt(e.Caption, 500)}");
     }
 
     private static string TruncateForPrompt(string? text, int maxChars)

@@ -36,6 +36,8 @@ El flujo de reconocimiento:
 5. Los eventos válidos se persisten en SQL Server (con deduplicación por `PostId`).
 6. Se devuelven **todos** los posts al cliente — tanto los clasificados como evento como los que no — con la información estructurada correspondiente.
 
+El endpoint `POST /api/events/recognize-deduplicated` ofrece el mismo reconocimiento evitando persistir de nuevo eventos que ya estén guardados (duplicados decididos por el LLM); ver la sección de endpoints.
+
 Los eventos persistidos pueden consultarse posteriormente mediante `GET /api/events/{eventUniqueId}` y listarse con `GET /api/events`. La propia API sirve además un panel web con vista de calendario en la raíz (`/`).
 
 ---
@@ -71,6 +73,7 @@ Los eventos persistidos pueden consultarse posteriormente mediante `GET /api/eve
 Cliente HTTP
     │
     │  POST /api/events/recognize   (header: X-DeepSeek-API-Key)
+    │  POST /api/events/recognize-deduplicated   (header: X-DeepSeek-API-Key)
     │  POST /api/events/cleanup     (header: X-DeepSeek-API-Key)
     │  POST /api/events/crosscheck  (header: X-DeepSeek-API-Key)
     │  PUT  /api/events/{eventUniqueId}   (header: X-DeepSeek-API-Key)
@@ -277,6 +280,32 @@ Ejemplo de evento recurrente ("todos los jueves desde el 10 de septiembre"):
 | `401` | Falta el header `X-DeepSeek-API-Key` |
 | `500` | Error al parsear la respuesta del LLM |
 | `502` | Error de comunicación con la API de DeepSeek |
+
+---
+
+### `POST /api/events/recognize-deduplicated`
+
+Igual que `POST /api/events/recognize` (mismo body, mismos query params `dateFrom`/`dateTo`, mismo header `X-DeepSeek-API-Key` y mismos códigos de error), con una diferencia: si un evento reconocido es **el mismo evento real que uno ya persistido** (anunciado en otro post, p. ej. la misma fiesta semanal publicada cada semana o el mismo concierto publicado por la sala y por el artista), el duplicado **no se persiste**: se conserva el evento ya guardado y es el que se devuelve en la respuesta para ese post.
+
+La comparación la hace el LLM (misma lógica de duplicados que `POST /api/events/cleanup`, con las siguientes reglas):
+
+- Se comparan los eventos recién reconocidos con los ya persistidos que caen en el rango de fechas solicitado (o con todos, si no se indica rango), más los eventos sin fecha.
+- Un evento persistido nunca se elimina ni se sustituye: como mucho, el evento nuevo se descarta por duplicado.
+- Dos posts del mismo lote sobre el mismo evento también se deduplican entre sí (se conserva el más completo).
+- Los posts cuyo `postId` ya está guardado se comportan igual que en `recognize`: no se insertan y se devuelve el registro almacenado.
+- Ante la duda, el LLM conserva el evento nuevo (no lo marca como duplicado).
+
+Ejemplo:
+
+```
+POST /api/events/recognize-deduplicated
+```
+
+**Request body**: el mismo array de posts que `POST /api/events/recognize`.
+
+**Response 200**: misma estructura que `POST /api/events/recognize`; para un post descartado por duplicado, el objeto `events[i]` contiene los datos del evento **ya persistido** (incluido su `eventUniqueId`).
+
+**Códigos de error**: los mismos que `POST /api/events/recognize`.
 
 ---
 
@@ -854,7 +883,7 @@ Ejemplo: `EVT-20260728-A1B2C3D4E5F6`
 
 La API **no** implementa autenticación de usuarios (JWT, OAuth, etc.). En su lugar:
 
-- Todos los endpoints que mutan datos (`POST /api/events/recognize`, `POST /api/events/cleanup`, `POST /api/events/crosscheck`, `PUT /api/events/{eventUniqueId}` y `DELETE /api/events/{eventUniqueId}`) requieren que el **cliente** proporcione la API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
+- Todos los endpoints que mutan datos (`POST /api/events/recognize`, `POST /api/events/recognize-deduplicated`, `POST /api/events/cleanup`, `POST /api/events/crosscheck`, `PUT /api/events/{eventUniqueId}` y `DELETE /api/events/{eventUniqueId}`) requieren que el **cliente** proporcione la API key de DeepSeek mediante el header `X-DeepSeek-API-Key`. La clave viaja del cliente a DeepSeek; el servidor no la almacena.
 - Los endpoints `GET /api/events` y `GET /api/events/{eventUniqueId}`, así como el panel web, son públicos.
 
 ### Secretos en el repositorio

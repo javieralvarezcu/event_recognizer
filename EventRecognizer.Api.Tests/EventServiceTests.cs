@@ -15,9 +15,10 @@ public class EventServiceTests
         Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze,
         Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null,
         Func<int, List<MuxoEvent>>? scrape = null,
-        Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? findCrossMatches = null)
+        Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? findCrossMatches = null,
+        Func<List<CleanupEventItem>, List<CleanupEventItem>, List<DuplicateGroupResult>>? findDuplicateCandidates = null)
         => new(
-            new FakeDeepSeekService(analyze, findDuplicates, findCrossMatches),
+            new FakeDeepSeekService(analyze, findDuplicates, findDuplicateCandidates, findCrossMatches),
             new FakeMuxoScraperService(scrape ?? (_ => new List<MuxoEvent>())),
             db,
             NullLogger<EventService>.Instance);
@@ -179,6 +180,230 @@ public class EventServiceTests
 
         Assert.Equal(4000, response.Events[0].Caption!.Length);
         Assert.Equal(4000, (await fixture.Db.EventRecords.SingleAsync()).Caption.Length);
+    }
+
+    [Fact]
+    public async Task RecognizeEventsDeduplicatedAsync_PersistsNewEvent_WhenNoExistingEvents()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1", "cartel de concierto") };
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Concierto X")
+        }, findDuplicateCandidates: (_, _) =>
+            throw new InvalidOperationException("The dedup LLM call must not happen."));
+
+        var response = await service.RecognizeEventsDeduplicatedAsync(posts, "key");
+
+        Assert.Equal(1, response.EventsFound);
+        var eventDto = response.Events[0];
+        Assert.True(eventDto.IsEvent);
+        Assert.Equal("Concierto X", eventDto.Title);
+        Assert.Equal("p1", eventDto.PostId);
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecognizeEventsDeduplicatedAsync_DropsCandidateReportedAsDuplicate_AndReturnsExistingRecord()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(TestData.CreateRecord(
+            "EVT-1", "Fiesta jueves", postId: "p-existing", eventDate: new DateTime(2026, 9, 17)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Jueves de fiesta")
+        }, findDuplicateCandidates: (candidates, _) => new List<DuplicateGroupResult>
+        {
+            new() { KeepEventId = "EVT-1", DuplicateEventIds = new List<string> { candidates[0].EventUniqueId } }
+        });
+
+        var response = await service.RecognizeEventsDeduplicatedAsync(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, "key");
+
+        // The duplicate is not persisted and the already stored event is returned.
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+        var eventDto = response.Events[0];
+        Assert.True(eventDto.IsEvent);
+        Assert.Equal("EVT-1", eventDto.EventUniqueId);
+        Assert.Equal("Fiesta jueves", eventDto.Title);
+    }
+
+    [Fact]
+    public async Task RecognizeEventsDeduplicatedAsync_PersistsCandidatesNotReportedAsDuplicates()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(TestData.CreateRecord(
+            "EVT-1", "Fiesta jueves", postId: "p-existing", eventDate: new DateTime(2026, 9, 17)));
+        await fixture.Db.SaveChangesAsync();
+
+        var posts = new List<InstagramPost>
+        {
+            TestData.CreatePost("p1", "Jueves de fiesta"),
+            TestData.CreatePost("p2", "Concierto nuevo")
+        };
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Jueves de fiesta"),
+            TestData.EventResult("Concierto nuevo")
+        }, findDuplicateCandidates: (candidates, _) => new List<DuplicateGroupResult>
+        {
+            // Only the first post duplicates the persisted event; the second is new.
+            new() { KeepEventId = "EVT-1", DuplicateEventIds = new List<string> { candidates[0].EventUniqueId } }
+        });
+
+        var response = await service.RecognizeEventsDeduplicatedAsync(posts, "key");
+
+        Assert.Equal(2, response.EventsFound);
+        Assert.Equal(2, await fixture.Db.EventRecords.CountAsync());
+
+        Assert.Equal("EVT-1", response.Events[0].EventUniqueId); // kept existing record
+        var newEvent = response.Events[1];
+        Assert.NotEqual("EVT-1", newEvent.EventUniqueId);
+        Assert.Equal("Concierto nuevo", newEvent.Title);
+        Assert.Equal("p2", newEvent.PostId);
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync(e => e.PostId == "p2"));
+    }
+
+    [Fact]
+    public async Task RecognizeEventsDeduplicatedAsync_WithPostIdAlreadyInDb_ReturnsDbRecordWithoutCallingDedupLlm()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(new EventRecord
+        {
+            EventUniqueId = "EVT-EXISTING-000000000001",
+            Title = "Evento ya guardado",
+            Summary = "Resumen existente",
+            Account = "test.account",
+            PostId = "p1",
+            Caption = "cartel original",
+            Url = "https://instagram.com/p/p1",
+            CreatedAt = DateTime.UtcNow
+        });
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Título nuevo del LLM")
+        }, findDuplicateCandidates: (_, _) =>
+            throw new InvalidOperationException("The dedup LLM call must not happen."));
+
+        var response = await service.RecognizeEventsDeduplicatedAsync(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, "key");
+
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+        Assert.Equal("EVT-EXISTING-000000000001", response.Events[0].EventUniqueId);
+        Assert.Equal("Evento ya guardado", response.Events[0].Title);
+    }
+
+    [Fact]
+    public async Task RecognizeEventsDeduplicatedAsync_WithTwoNewPostsOfSameEvent_KeepsOnlyKeeper()
+    {
+        using var fixture = new TestDatabase();
+        var posts = new List<InstagramPost>
+        {
+            TestData.CreatePost("p1", "Fiesta jueves"),
+            TestData.CreatePost("p2", "Jueves de fiesta")
+        };
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Fiesta jueves"),
+            TestData.EventResult("Jueves de fiesta")
+        }, findDuplicateCandidates: (candidates, existing) =>
+        {
+            Assert.Empty(existing);
+            return new List<DuplicateGroupResult>
+            {
+                new() { KeepEventId = candidates[0].EventUniqueId, DuplicateEventIds = new List<string> { candidates[1].EventUniqueId } }
+            };
+        });
+
+        var response = await service.RecognizeEventsDeduplicatedAsync(posts, "key");
+
+        // Only the keeper is persisted, and both posts map to its record.
+        var stored = await fixture.Db.EventRecords.SingleAsync();
+        Assert.Equal("p1", stored.PostId);
+        Assert.Equal(2, response.EventsFound);
+        Assert.Equal(stored.EventUniqueId, response.Events[0].EventUniqueId);
+        Assert.Equal(stored.EventUniqueId, response.Events[1].EventUniqueId);
+    }
+
+    [Fact]
+    public async Task RecognizeEventsDeduplicatedAsync_WithRange_ComparesOnlyAgainstEventsInRange()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.AddRange(
+            TestData.CreateRecord("EVT-in", "Evento del mes", postId: "p-in", eventDate: new DateTime(2026, 9, 5)),
+            TestData.CreateRecord("EVT-nodate", "Evento sin fecha", postId: "p-nodate"),
+            TestData.CreateRecord("EVT-out", "Evento de mayo", postId: "p-out", eventDate: new DateTime(2026, 5, 10)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Evento de septiembre", "2026-09-19T22:00:00")
+        }, findDuplicateCandidates: (_, existing) =>
+        {
+            // The in-range event and the no-date event are sent; May's event is not.
+            Assert.Equal(new[] { "EVT-in", "EVT-nodate" },
+                existing.Select(e => e.EventUniqueId).OrderBy(id => id));
+            return new List<DuplicateGroupResult>();
+        });
+
+        var response = await service.RecognizeEventsDeduplicatedAsync(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, "key", Range("2026-09-01", "2026-09-30"));
+
+        Assert.Equal(1, response.EventsFound);
+        Assert.Equal(4, await fixture.Db.EventRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecognizeEventsDeduplicatedAsync_IgnoresGroupsWithUnknownIds()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(TestData.CreateRecord(
+            "EVT-1", "Evento existente", postId: "p-existing", eventDate: new DateTime(2026, 9, 5)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Evento nuevo")
+        }, findDuplicateCandidates: (candidates, _) => new List<DuplicateGroupResult>
+        {
+            // Unknown keeper: the whole group is discarded, the candidate survives.
+            new() { KeepEventId = "EVT-GHOST", DuplicateEventIds = new List<string> { candidates[0].EventUniqueId } }
+        });
+
+        var response = await service.RecognizeEventsDeduplicatedAsync(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, "key");
+
+        Assert.Equal(2, await fixture.Db.EventRecords.CountAsync());
+        Assert.Equal("Evento nuevo", response.Events[0].Title);
+    }
+
+    [Fact]
+    public async Task RecognizeEventsDeduplicatedAsync_ExistingListedAsDuplicate_StillKeepsExisting()
+    {
+        using var fixture = new TestDatabase();
+        fixture.Db.EventRecords.Add(TestData.CreateRecord(
+            "EVT-1", "Fiesta jueves", postId: "p-existing", eventDate: new DateTime(2026, 9, 17)));
+        await fixture.Db.SaveChangesAsync();
+
+        var service = CreateService(fixture.Db, (_, _) => new List<PostAnalysisResult>
+        {
+            TestData.EventResult("Jueves de fiesta")
+        }, findDuplicateCandidates: (candidates, _) => new List<DuplicateGroupResult>
+        {
+            // LLM violated the prompt (keeper is the new event, existing listed as
+            // duplicate): the existing event still wins and the candidate is dropped.
+            new() { KeepEventId = candidates[0].EventUniqueId, DuplicateEventIds = new List<string> { "EVT-1" } }
+        });
+
+        var response = await service.RecognizeEventsDeduplicatedAsync(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, "key");
+
+        Assert.Equal(1, await fixture.Db.EventRecords.CountAsync());
+        Assert.Equal("EVT-1", response.Events[0].EventUniqueId);
     }
 
     [Fact]

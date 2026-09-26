@@ -24,6 +24,18 @@ public interface IEventService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Like <see cref="RecognizeEventsAsync"/>, but events that duplicate an already
+    /// persisted one (same real event announced in another post, decided by the LLM)
+    /// are not saved again: the already stored event stays and is the one returned for
+    /// the duplicated post.
+    /// </summary>
+    Task<RecognitionResponse> RecognizeEventsDeduplicatedAsync(
+        List<InstagramPost> posts,
+        string deepSeekApiKey,
+        DateRange? dateRange = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Retrieves an event by its unique event identifier.
     /// </summary>
     Task<EventDetailResponse?> GetEventByUniqueIdAsync(string eventUniqueId, CancellationToken ct = default);

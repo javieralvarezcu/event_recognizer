@@ -77,15 +77,18 @@ public sealed class FakeDeepSeekService : IDeepSeekService
 {
     private readonly Func<List<InstagramPost>, string, List<PostAnalysisResult>> _analyze;
     private readonly Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? _findDuplicates;
+    private readonly Func<List<CleanupEventItem>, List<CleanupEventItem>, List<DuplicateGroupResult>>? _findDuplicateCandidates;
     private readonly Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? _findCrossMatches;
 
     public FakeDeepSeekService(
         Func<List<InstagramPost>, string, List<PostAnalysisResult>> analyze,
         Func<List<CleanupEventItem>, string, List<DuplicateGroupResult>>? findDuplicates = null,
+        Func<List<CleanupEventItem>, List<CleanupEventItem>, List<DuplicateGroupResult>>? findDuplicateCandidates = null,
         Func<List<CleanupEventItem>, List<MuxoEventItem>, List<CrossMatchResult>>? findCrossMatches = null)
     {
         _analyze = analyze;
         _findDuplicates = findDuplicates;
+        _findDuplicateCandidates = findDuplicateCandidates;
         _findCrossMatches = findCrossMatches;
     }
 
@@ -96,6 +99,10 @@ public sealed class FakeDeepSeekService : IDeepSeekService
     public List<CleanupEventItem>? LastCleanupEvents { get; private set; }
 
     public string? LastCleanupMonthLabel { get; private set; }
+
+    public List<CleanupEventItem>? LastDuplicateCandidates { get; private set; }
+
+    public List<CleanupEventItem>? LastDuplicateExistingEvents { get; private set; }
 
     public List<MuxoEventItem>? LastCrossMatchMuxoEvents { get; private set; }
 
@@ -122,6 +129,20 @@ public sealed class FakeDeepSeekService : IDeepSeekService
         return Task.FromResult(_findDuplicates != null
             ? _findDuplicates(events, monthLabel)
             : throw new InvalidOperationException("No findDuplicates delegate configured."));
+    }
+
+    public Task<List<DuplicateGroupResult>> FindDuplicateCandidatesAsync(
+        List<CleanupEventItem> candidates,
+        List<CleanupEventItem> existingEvents,
+        string apiKey,
+        CancellationToken ct = default)
+    {
+        LastDuplicateCandidates = candidates;
+        LastDuplicateExistingEvents = existingEvents;
+        ReceivedApiKeys.Add(apiKey);
+        return Task.FromResult(_findDuplicateCandidates != null
+            ? _findDuplicateCandidates(candidates, existingEvents)
+            : throw new InvalidOperationException("No findDuplicateCandidates delegate configured."));
     }
 
     public Task<List<CrossMatchResult>> FindCrossMatchesAsync(
@@ -163,6 +184,7 @@ public sealed class FakeMuxoScraperService : IMuxoScraperService
 public sealed class FakeEventService : IEventService
 {
     private readonly Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? _recognize;
+    private readonly Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? _recognizeDeduplicated;
     private readonly Func<string, CancellationToken, Task<EventDetailResponse?>>? _getByUniqueId;
     private readonly Func<CancellationToken, Task<List<EventDetailResponse>>>? _getAll;
     private readonly Func<int, int, string, CancellationToken, Task<CleanupResponse>>? _cleanup;
@@ -173,6 +195,7 @@ public sealed class FakeEventService : IEventService
 
     public FakeEventService(
         Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? recognize = null,
+        Func<List<InstagramPost>, string, CancellationToken, Task<RecognitionResponse>>? recognizeDeduplicated = null,
         Func<string, CancellationToken, Task<EventDetailResponse?>>? getByUniqueId = null,
         Func<CancellationToken, Task<List<EventDetailResponse>>>? getAll = null,
         Func<int, int, string, CancellationToken, Task<CleanupResponse>>? cleanup = null,
@@ -182,6 +205,7 @@ public sealed class FakeEventService : IEventService
         Func<string, CancellationToken, Task<bool>>? deleteEvent = null)
     {
         _recognize = recognize;
+        _recognizeDeduplicated = recognizeDeduplicated;
         _getByUniqueId = getByUniqueId;
         _getAll = getAll;
         _cleanup = cleanup;
@@ -193,6 +217,8 @@ public sealed class FakeEventService : IEventService
 
     public DateRange? LastDateRange { get; private set; }
 
+    public DateRange? LastDedupDateRange { get; private set; }
+
     public Task<RecognitionResponse> RecognizeEventsAsync(
         List<InstagramPost> posts,
         string deepSeekApiKey,
@@ -203,6 +229,18 @@ public sealed class FakeEventService : IEventService
         return _recognize != null
             ? _recognize(posts, deepSeekApiKey, ct)
             : throw new InvalidOperationException("No recognize delegate configured.");
+    }
+
+    public Task<RecognitionResponse> RecognizeEventsDeduplicatedAsync(
+        List<InstagramPost> posts,
+        string deepSeekApiKey,
+        DateRange? dateRange = null,
+        CancellationToken ct = default)
+    {
+        LastDedupDateRange = dateRange;
+        return _recognizeDeduplicated != null
+            ? _recognizeDeduplicated(posts, deepSeekApiKey, ct)
+            : throw new InvalidOperationException("No recognizeDeduplicated delegate configured.");
     }
 
     public Task<EventDetailResponse?> GetEventByUniqueIdAsync(string eventUniqueId, CancellationToken ct = default)

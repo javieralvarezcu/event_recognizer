@@ -172,6 +172,88 @@ public class EventsControllerTests
     }
 
     [Fact]
+    public async Task RecognizeDeduplicated_WithEmptyPosts_ReturnsBadRequest()
+    {
+        var controller = CreateController(new FakeEventService());
+
+        var result = await controller.RecognizeDeduplicated(new List<InstagramPost>(), null, null, CancellationToken.None);
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(badRequest.Value);
+        Assert.Equal("No posts provided", error.Error);
+    }
+
+    [Fact]
+    public async Task RecognizeDeduplicated_WithMissingApiKeyHeader_ReturnsUnauthorized()
+    {
+        var controller = CreateController(new FakeEventService());
+
+        var result = await controller.RecognizeDeduplicated(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, null, null, CancellationToken.None);
+
+        var unauthorized = Assert.IsType<UnauthorizedObjectResult>(result);
+        var error = Assert.IsType<ErrorResponse>(unauthorized.Value);
+        Assert.Equal("Missing API key", error.Error);
+    }
+
+    [Fact]
+    public async Task RecognizeDeduplicated_WithKeyAndPosts_ReturnsOkAndPassesThemThrough()
+    {
+        string? receivedKey = null;
+        List<InstagramPost>? receivedPosts = null;
+        var response = new RecognitionResponse { TotalPosts = 1, EventsFound = 0, Events = new List<RecognizedEventDto>() };
+        var service = new FakeEventService(recognizeDeduplicated: (posts, key, _) =>
+        {
+            receivedKey = key;
+            receivedPosts = posts;
+            return Task.FromResult(response);
+        });
+        var controller = CreateController(service, new HeaderDictionary
+        {
+            ["X-DeepSeek-API-Key"] = "secret-key"
+        });
+        var posts = new List<InstagramPost> { TestData.CreatePost("p1") };
+
+        var result = await controller.RecognizeDeduplicated(posts, null, null, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Same(response, ok.Value);
+        Assert.Equal("secret-key", receivedKey);
+        Assert.Same(posts, receivedPosts);
+        Assert.Null(service.LastDedupDateRange);
+    }
+
+    [Fact]
+    public async Task RecognizeDeduplicated_WithDateRange_PassesRangeToService()
+    {
+        var service = new FakeEventService(recognizeDeduplicated: (_, _, _) => Task.FromResult(new RecognitionResponse()));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+        var dateFrom = new DateTime(2026, 9, 1);
+        var dateTo = new DateTime(2026, 9, 30);
+
+        var result = await controller.RecognizeDeduplicated(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, dateFrom, dateTo, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(new DateRange(dateFrom, dateTo), service.LastDedupDateRange);
+    }
+
+    [Fact]
+    public async Task RecognizeDeduplicated_WhenServiceThrowsHttpRequestException_Returns502()
+    {
+        var service = new FakeEventService(recognizeDeduplicated: (_, _, _) => throw new HttpRequestException("boom"));
+        var controller = CreateController(service, new HeaderDictionary { ["X-DeepSeek-API-Key"] = "k" });
+
+        var result = await controller.RecognizeDeduplicated(
+            new List<InstagramPost> { TestData.CreatePost("p1") }, null, null, CancellationToken.None);
+
+        var objectResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, objectResult.StatusCode);
+        var error = Assert.IsType<ErrorResponse>(objectResult.Value);
+        Assert.Equal("Failed to communicate with the LLM service", error.Error);
+    }
+
+    [Fact]
     public async Task GetByUniqueId_WhenNotFound_Returns404()
     {
         var service = new FakeEventService(getByUniqueId: (_, _) => Task.FromResult<EventDetailResponse?>(null));

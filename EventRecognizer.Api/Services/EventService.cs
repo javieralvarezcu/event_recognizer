@@ -35,6 +35,119 @@ public class EventService : IEventService
         DateRange? dateRange = null,
         CancellationToken ct = default)
     {
+        var (analyses, isValidEvent, eventRecords) =
+            await BuildEventCandidatesAsync(posts, deepSeekApiKey, dateRange, ct);
+
+        // 4. Check for duplicates (skip existing post_ids) and persist only new events
+        var existingPostIds = await _dbContext.EventRecords
+            .Where(e => eventRecords.Select(ep => ep.PostId).Contains(e.PostId))
+            .Select(e => e.PostId)
+            .ToListAsync(ct);
+
+        await PersistNewEventsAsync(
+            eventRecords.Where(ep => !existingPostIds.Contains(ep.PostId)).ToList(), ct);
+
+        // 5. Fetch existing events from DB so we return full data for duplicates too
+        var allEventPostIds = eventRecords.Select(e => e.PostId).ToHashSet();
+        var existingEvents = await _dbContext.EventRecords
+            .Where(e => allEventPostIds.Contains(e.PostId))
+            .ToListAsync(ct);
+
+        // 6. Build response — return ALL posts (event + non-event)
+        return MapToResponse(posts, analyses, existingEvents.ToDictionary(e => e.PostId), isValidEvent);
+    }
+
+    public async Task<RecognitionResponse> RecognizeEventsDeduplicatedAsync(
+        List<InstagramPost> posts,
+        string deepSeekApiKey,
+        DateRange? dateRange = null,
+        CancellationToken ct = default)
+    {
+        var (analyses, isValidEvent, candidates) =
+            await BuildEventCandidatesAsync(posts, deepSeekApiKey, dateRange, ct);
+
+        // 4. Posts whose PostId is already persisted are known events: their stored
+        //    record stays, same as in RecognizeEventsAsync.
+        var existingPostIds = await _dbContext.EventRecords
+            .Where(e => candidates.Select(ep => ep.PostId).Contains(e.PostId))
+            .Select(e => e.PostId)
+            .ToListAsync(ct);
+
+        var freshCandidates = candidates
+            .Where(c => !existingPostIds.Contains(c.PostId))
+            .ToList();
+
+        // 5. Ask the LLM which fresh candidates are the same real event as one already
+        //    persisted (or as another candidate of this batch) and drop them: the
+        //    already stored event stays and the duplicate is not saved again. With a
+        //    single candidate and no persisted events there is nothing to compare.
+        var existingEvents = await LoadExistingEventsForDedupAsync(dateRange, ct);
+
+        var droppedBy = new Dictionary<string, string>(); // candidate id -> id of the event that stays
+        if (freshCandidates.Count > 0 && (freshCandidates.Count > 1 || existingEvents.Count > 0))
+        {
+            var groups = await _deepSeekService.FindDuplicateCandidatesAsync(
+                freshCandidates.Select(ToCleanupItem).ToList(),
+                existingEvents.Select(ToCleanupItem).ToList(),
+                deepSeekApiKey, ct);
+
+            droppedBy = ResolveDroppedCandidates(groups, freshCandidates, existingEvents);
+            if (droppedBy.Count > 0)
+                _logger.LogInformation("Recognition dropped {Count} duplicate candidates", droppedBy.Count);
+        }
+
+        // 6. Persist only the survivors.
+        await PersistNewEventsAsync(
+            freshCandidates.Where(c => !droppedBy.ContainsKey(c.EventUniqueId)).ToList(), ct);
+
+        // 7. Build the response: every valid event post maps to the persisted event
+        //    that stays — its own record, or the kept one when dropped as duplicate.
+        var allEventPostIds = candidates.Select(c => c.PostId).ToHashSet();
+        var dbEvents = await _dbContext.EventRecords
+            .Where(e => allEventPostIds.Contains(e.PostId))
+            .ToListAsync(ct);
+
+        var keptByUniqueId = new Dictionary<string, EventRecord>();
+        foreach (var e in existingEvents)
+            keptByUniqueId.TryAdd(e.EventUniqueId, e);
+        foreach (var e in dbEvents)
+            keptByUniqueId.TryAdd(e.EventUniqueId, e);
+
+        var dbEventsByPostId = dbEvents.ToDictionary(e => e.PostId);
+        var eventsByPostId = new Dictionary<string, EventRecord>();
+        foreach (var candidate in candidates)
+        {
+            if (existingPostIds.Contains(candidate.PostId)
+                && dbEventsByPostId.TryGetValue(candidate.PostId, out var known))
+            {
+                eventsByPostId[candidate.PostId] = known;
+            }
+            else if (droppedBy.TryGetValue(candidate.EventUniqueId, out var keptId)
+                     && keptByUniqueId.TryGetValue(keptId, out var keptEvent))
+            {
+                eventsByPostId[candidate.PostId] = keptEvent;
+            }
+            else if (dbEventsByPostId.TryGetValue(candidate.PostId, out var ownRecord))
+            {
+                eventsByPostId[candidate.PostId] = ownRecord;
+            }
+        }
+
+        return MapToResponse(posts, analyses, eventsByPostId, isValidEvent);
+    }
+
+    /// <summary>
+    /// Common first half of recognition: sends the posts to the LLM, decides which
+    /// posts are valid events for the requested date range, and builds the candidate
+    /// event records. Repeated posts within the same batch are processed only once.
+    /// </summary>
+    private async Task<(List<PostAnalysisResult> Analyses, bool[] IsValidEvent, List<EventRecord> Candidates)>
+        BuildEventCandidatesAsync(
+            List<InstagramPost> posts,
+            string deepSeekApiKey,
+            DateRange? dateRange,
+            CancellationToken ct)
+    {
         // 1. Send all posts to DeepSeek for analysis
         var analyses = await _deepSeekService.AnalyzePostsAsync(posts, deepSeekApiKey, dateRange, ct);
 
@@ -50,7 +163,6 @@ public class EventService : IEventService
         }
 
         // 3. Build event records for valid event posts.
-        //    Keyed by PostId so repeated posts within the same batch are only processed once.
         var eventPosts = new Dictionary<string, EventRecord>();
         for (int i = 0; i < posts.Count && i < analyses.Count; i++)
         {
@@ -61,93 +173,172 @@ public class EventService : IEventService
             if (eventPosts.ContainsKey(post.PostId))
                 continue;
 
-            var analysis = analyses[i];
-
-            var eventRecord = new EventRecord
-            {
-                EventUniqueId = GenerateEventUniqueId(post, analysis),
-                Title = analysis.Title ?? "Sin título",
-                EventDate = ParseEventDate(analysis.EventDate),
-                EventDateDescription = analysis.EventDateDescription,
-                Summary = analysis.Summary ?? "Sin resumen",
-                IsRecurrent = analysis.IsRecurrent,
-                RecurrenceType = string.IsNullOrWhiteSpace(analysis.RecurrenceType)
-                    ? null
-                    : Truncate(analysis.RecurrenceType, 20),
-                RecurrenceDaysOfWeek = FormatRecurrenceDays(analysis.RecurrenceDaysOfWeek),
-                RecurrenceStartDate = ParseEventDate(analysis.RecurrenceStartDate),
-                RecurrenceEndDate = ParseEventDate(analysis.RecurrenceEndDate),
-                Account = post.Account,
-                PostId = post.PostId,
-                Caption = Truncate(post.Caption, 4000),
-                PostDatetime = post.Datetime,
-                Url = post.Url,
-                ImageUrl = post.ImageUrl,
-                CreatedAt = DateTime.UtcNow
-            };
-
-            eventPosts[post.PostId] = eventRecord;
+            eventPosts[post.PostId] = BuildEventRecord(post, analyses[i]);
         }
 
-        // 4. Check for duplicates (skip existing post_ids) and persist only new events
-        var eventRecords = eventPosts.Values.ToList();
+        return (analyses, isValidEvent, eventPosts.Values.ToList());
+    }
 
-        var existingPostIds = await _dbContext.EventRecords
-            .Where(e => eventRecords.Select(ep => ep.PostId).Contains(e.PostId))
-            .Select(e => e.PostId)
-            .ToListAsync(ct);
-
-        var newEvents = eventRecords
-            .Where(ep => !existingPostIds.Contains(ep.PostId))
-            .ToList();
-
-        if (newEvents.Count > 0)
+    private static EventRecord BuildEventRecord(InstagramPost post, PostAnalysisResult analysis)
+    {
+        return new EventRecord
         {
-            _dbContext.EventRecords.AddRange(newEvents);
+            EventUniqueId = GenerateEventUniqueId(post, analysis),
+            Title = analysis.Title ?? "Sin título",
+            EventDate = ParseEventDate(analysis.EventDate),
+            EventDateDescription = analysis.EventDateDescription,
+            Summary = analysis.Summary ?? "Sin resumen",
+            IsRecurrent = analysis.IsRecurrent,
+            RecurrenceType = string.IsNullOrWhiteSpace(analysis.RecurrenceType)
+                ? null
+                : Truncate(analysis.RecurrenceType, 20),
+            RecurrenceDaysOfWeek = FormatRecurrenceDays(analysis.RecurrenceDaysOfWeek),
+            RecurrenceStartDate = ParseEventDate(analysis.RecurrenceStartDate),
+            RecurrenceEndDate = ParseEventDate(analysis.RecurrenceEndDate),
+            Account = post.Account,
+            PostId = post.PostId,
+            Caption = Truncate(post.Caption, 4000),
+            PostDatetime = post.Datetime,
+            Url = post.Url,
+            ImageUrl = post.ImageUrl,
+            CreatedAt = DateTime.UtcNow
+        };
+    }
 
-            try
+    /// <summary>
+    /// Persists the given new events, skipping any whose PostId was inserted
+    /// concurrently after the duplicate check (the unique PostId index makes the save
+    /// fail, and only the still-missing events are retried).
+    /// </summary>
+    private async Task PersistNewEventsAsync(List<EventRecord> newEvents, CancellationToken ct)
+    {
+        if (newEvents.Count == 0)
+            return;
+
+        _dbContext.EventRecords.AddRange(newEvents);
+
+        try
+        {
+            await _dbContext.SaveChangesAsync(ct);
+            _logger.LogInformation("Persisted {Count} new events", newEvents.Count);
+        }
+        catch (DbUpdateException ex)
+        {
+            // Race: a concurrent request inserted one or more of these events after
+            // our duplicate check. Detach the pending inserts, re-check against the
+            // DB and retry only the ones that are still missing.
+            _logger.LogWarning(ex, "Duplicate key conflict while saving events. Re-checking and retrying.");
+
+            foreach (var entry in _dbContext.ChangeTracker.Entries<EventRecord>().ToList())
             {
-                await _dbContext.SaveChangesAsync(ct);
-                _logger.LogInformation("Persisted {Count} new events", newEvents.Count);
+                _dbContext.Entry(entry.Entity).State = EntityState.Detached;
             }
-            catch (DbUpdateException ex)
+
+            var nowExistingPostIds = await _dbContext.EventRecords
+                .Where(e => newEvents.Select(n => n.PostId).Contains(e.PostId))
+                .Select(e => e.PostId)
+                .ToListAsync(ct);
+
+            var remaining = newEvents
+                .Where(n => !nowExistingPostIds.Contains(n.PostId))
+                .ToList();
+
+            if (remaining.Count > 0)
             {
-                // Race: a concurrent request inserted one or more of these events after
-                // our duplicate check. Detach the pending inserts, re-check against the
-                // DB and retry only the ones that are still missing.
-                _logger.LogWarning(ex, "Duplicate key conflict while saving events. Re-checking and retrying.");
+                _dbContext.EventRecords.AddRange(remaining);
+                await _dbContext.SaveChangesAsync(ct);
+                _logger.LogInformation("Persisted {Count} new events after retry", remaining.Count);
+            }
+        }
+    }
 
-                foreach (var entry in _dbContext.ChangeTracker.Entries<EventRecord>().ToList())
-                {
-                    _dbContext.Entry(entry.Entity).State = EntityState.Detached;
-                }
+    /// <summary>
+    /// Resolves the LLM duplicate groups into the candidates that must not be
+    /// persisted, mapped to the persisted event that stays for each of them.
+    /// Candidates grouped with an existing event are always dropped (the existing
+    /// event stays); groups with only new events drop their non-keeper candidates.
+    /// </summary>
+    private static Dictionary<string, string> ResolveDroppedCandidates(
+        List<DuplicateGroupResult> groups,
+        List<EventRecord> candidates,
+        List<EventRecord> existingEvents)
+    {
+        var candidateIds = candidates.Select(c => c.EventUniqueId).ToHashSet();
+        var existingIds = existingEvents.Select(e => e.EventUniqueId).ToHashSet();
 
-                var nowExistingPostIds = await _dbContext.EventRecords
-                    .Where(e => newEvents.Select(n => n.PostId).Contains(e.PostId))
-                    .Select(e => e.PostId)
-                    .ToListAsync(ct);
+        var dropped = new Dictionary<string, string>();
 
-                var remaining = newEvents
-                    .Where(n => !nowExistingPostIds.Contains(n.PostId))
-                    .ToList();
+        // First pass: groups that reference an existing event drop all their candidates.
+        foreach (var group in groups)
+        {
+            var groupIds = group.DuplicateEventIds.Append(group.KeepEventId).ToList();
+            var groupCandidates = groupIds.Where(candidateIds.Contains).ToList();
+            if (groupCandidates.Count == 0)
+                continue;
 
-                if (remaining.Count > 0)
-                {
-                    _dbContext.EventRecords.AddRange(remaining);
-                    await _dbContext.SaveChangesAsync(ct);
-                    _logger.LogInformation("Persisted {Count} new events after retry", remaining.Count);
-                }
+            var groupExisting = groupIds.Where(existingIds.Contains).ToList();
+            if (groupExisting.Count == 0)
+                continue;
+
+            var keptId = groupExisting.Contains(group.KeepEventId) ? group.KeepEventId : groupExisting[0];
+            foreach (var candidateId in groupCandidates)
+                dropped[candidateId] = keptId;
+        }
+
+        // Second pass: groups with only new events dedupe among themselves (the
+        // keeper survives, the rest are dropped).
+        foreach (var group in groups)
+        {
+            var groupIds = group.DuplicateEventIds.Append(group.KeepEventId).ToList();
+            if (groupIds.Any(existingIds.Contains))
+                continue; // mixed groups are handled above
+
+            if (!candidateIds.Contains(group.KeepEventId))
+                continue; // unknown keeper: skip the group, like cleanup does
+
+            foreach (var duplicateId in group.DuplicateEventIds)
+            {
+                if (duplicateId == group.KeepEventId)
+                    continue; // self-reference: a keeper is never dropped by its own group
+                if (candidateIds.Contains(duplicateId))
+                    dropped.TryAdd(duplicateId, group.KeepEventId);
             }
         }
 
-        // 5. Fetch existing events from DB so we return full data for duplicates too
-        var allEventPostIds = eventRecords.Select(e => e.PostId).ToHashSet();
-        var existingEvents = await _dbContext.EventRecords
-            .Where(e => allEventPostIds.Contains(e.PostId))
-            .ToListAsync(ct);
+        // Resolve chains: a keeper candidate dropped in the first pass leaves its own
+        // duplicates pointing at it — follow to the final persisted event.
+        foreach (var key in dropped.Keys.ToList())
+        {
+            var seen = new HashSet<string> { key };
+            var target = dropped[key];
+            while (dropped.TryGetValue(target, out var next))
+            {
+                if (!seen.Add(target))
+                    break; // contradictory cycles: keep the current mapping
+                target = next;
+            }
+            dropped[key] = target;
+        }
 
-        // 6. Build response — return ALL posts (event + non-event)
-        return MapToResponse(posts, analyses, existingEvents, isValidEvent);
+        return dropped;
+    }
+
+    /// <summary>
+    /// The already persisted events sent to the LLM for the duplicate check: the ones
+    /// occurring within the requested date range plus the events without any date (so
+    /// an undated candidate can match a dated one), or all of them when no range was
+    /// requested.
+    /// </summary>
+    private async Task<List<EventRecord>> LoadExistingEventsForDedupAsync(DateRange? dateRange, CancellationToken ct)
+    {
+        if (dateRange == null)
+            return await _dbContext.EventRecords.AsNoTracking().ToListAsync(ct);
+
+        var records = await _dbContext.EventRecords.AsNoTracking().ToListAsync(ct);
+        return records
+            .Where(r => EventOccursInRange(r, dateRange.From ?? DateTime.MinValue, dateRange.To ?? DateTime.MaxValue)
+                        || HasNoDate(r))
+            .ToList();
     }
 
     public async Task<EventDetailResponse?> GetEventByUniqueIdAsync(string eventUniqueId, CancellationToken ct = default)
@@ -423,7 +614,7 @@ public class EventService : IEventService
         // Analyze: events occurring within the month + events without any computable
         // date (those in the "sin fecha" list, crossed against the month's events).
         var analyzed = records
-            .Where(r => OccursInMonth(r, monthStart, monthEnd) || HasNoDate(r))
+            .Where(r => EventOccursInRange(r, monthStart, monthEnd) || HasNoDate(r))
             .ToList();
 
         if (analyzed.Count == 0)
@@ -506,7 +697,7 @@ public class EventService : IEventService
     /// Whether the event (or one of its recurrences) occurs on any day of [from, to].
     /// Reuses the same day-granularity logic as recognition filtering.
     /// </summary>
-    private static bool OccursInMonth(EventRecord r, DateTime from, DateTime to)
+    private static bool EventOccursInRange(EventRecord r, DateTime from, DateTime to)
     {
         var analysis = new PostAnalysisResult
         {
@@ -573,11 +764,9 @@ public class EventService : IEventService
     private static RecognitionResponse MapToResponse(
         List<InstagramPost> posts,
         List<PostAnalysisResult> analyses,
-        List<EventRecord> dbEvents,
+        Dictionary<string, EventRecord> dbEventsByPostId,
         bool[] isValidEvent)
     {
-        var dbEventsByPostId = dbEvents.ToDictionary(e => e.PostId);
-
         var results = new List<RecognizedEventDto>(posts.Count);
         var seenPostIds = new HashSet<string>();
         for (int i = 0; i < posts.Count && i < analyses.Count; i++)

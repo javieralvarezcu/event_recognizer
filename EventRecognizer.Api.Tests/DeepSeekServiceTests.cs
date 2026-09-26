@@ -385,6 +385,91 @@ public class DeepSeekServiceTests
         Assert.Contains("NO te fíes solo del título", systemPrompt);
     }
 
+    [Fact]
+    public async Task FindDuplicateCandidatesAsync_WithNothingToCompare_ReturnsEmptyWithoutCallingApi()
+    {
+        // No candidates at all.
+        var groups = await _service.FindDuplicateCandidatesAsync(
+            new List<CleanupEventItem>(), CreateCleanupEvents(), "key");
+        Assert.Empty(groups);
+        Assert.Empty(_handler.Requests);
+
+        // A single candidate with no existing events cannot duplicate anything.
+        groups = await _service.FindDuplicateCandidatesAsync(
+            CreateCleanupEvents().Take(1).ToList(), new List<CleanupEventItem>(), "key");
+        Assert.Empty(groups);
+        Assert.Empty(_handler.Requests);
+    }
+
+    [Fact]
+    public async Task FindDuplicateCandidatesAsync_WithValidResponse_ReturnsParsedGroups()
+    {
+        var groups = new List<DuplicateGroupResult>
+        {
+            new()
+            {
+                KeepEventId = "EVT-1",
+                DuplicateEventIds = new List<string> { "EVT-CAND-1" },
+                Reason = "Misma fiesta semanal"
+            }
+        };
+        _handler.Enqueue(HttpStatusCode.OK, TestData.BuildCleanupDeepSeekResponse(groups));
+
+        var candidates = new List<CleanupEventItem>
+        {
+            new() { EventUniqueId = "EVT-CAND-1", Title = "Jueves de fiesta", Account = "club_x" }
+        };
+
+        var result = await _service.FindDuplicateCandidatesAsync(candidates, CreateCleanupEvents(), "test-api-key");
+
+        var group = Assert.Single(result);
+        Assert.Equal("EVT-1", group.KeepEventId);
+        Assert.Equal("EVT-CAND-1", Assert.Single(group.DuplicateEventIds));
+        Assert.Equal("Misma fiesta semanal", group.Reason);
+
+        var request = Assert.Single(_handler.Requests);
+        Assert.Equal("Bearer test-api-key", request.Headers.Authorization!.ToString());
+    }
+
+    [Fact]
+    public async Task FindDuplicateCandidatesAsync_Prompts_SeparateNewAndExistingLists()
+    {
+        _handler.Enqueue(HttpStatusCode.OK, TestData.BuildCleanupDeepSeekResponse(new List<DuplicateGroupResult>()));
+
+        var candidates = new List<CleanupEventItem>
+        {
+            new() { EventUniqueId = "EVT-CAND-1", Title = "Jueves de fiesta", Account = "club_x" }
+        };
+
+        await _service.FindDuplicateCandidatesAsync(candidates, CreateCleanupEvents(), "key");
+
+        var payload = JsonSerializer.Deserialize<DeepSeekRequest>(Assert.Single(_handler.RequestBodies)!)!;
+        var userPrompt = payload.Messages[1].Content;
+        Assert.Contains("EVENTOS NUEVOS", userPrompt);
+        Assert.Contains("EVENTOS EXISTENTES", userPrompt);
+        Assert.Contains("EVT-CAND-1", userPrompt);
+        Assert.Contains("EVT-1", userPrompt);
+
+        var systemPrompt = payload.Messages[0].Content;
+        Assert.Contains("duplicate_groups", systemPrompt);
+        Assert.Contains("keep_event_id SIEMPRE es el ID del evento existente", systemPrompt);
+        Assert.Contains("conserva el evento nuevo", systemPrompt);
+    }
+
+    [Fact]
+    public async Task FindDuplicateCandidatesAsync_WithTwoCandidatesAndNoExisting_CallsTheApi()
+    {
+        // Two new posts of the same event can still duplicate each other, so the
+        // call happens even with no existing events.
+        _handler.Enqueue(HttpStatusCode.OK, TestData.BuildCleanupDeepSeekResponse(new List<DuplicateGroupResult>()));
+
+        var result = await _service.FindDuplicateCandidatesAsync(
+            CreateCleanupEvents(), new List<CleanupEventItem>(), "key");
+
+        Assert.Empty(result);
+        Assert.Single(_handler.Requests);
+    }
+
     private static List<MuxoEventItem> CreateMuxoItems()
         => new()
         {

@@ -41,33 +41,11 @@ public class EventsController : ControllerBase
         [FromQuery] DateTime? dateTo = null,
         CancellationToken ct = default)
     {
-        if (posts == null || posts.Count == 0)
+        if (ValidateRecognizeRequest(posts, dateFrom, dateTo, out var deepSeekApiKey, out var dateRange)
+            is { } error)
         {
-            return BadRequest(new ErrorResponse
-            {
-                Error = "No posts provided",
-                Detail = "The request body must be a non-empty array of Instagram posts."
-            });
+            return error;
         }
-
-        var deepSeekApiKey = Request.Headers[DeepSeekApiKeyHeader].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(deepSeekApiKey))
-        {
-            return MissingApiKey();
-        }
-
-        if (dateFrom.HasValue && dateTo.HasValue && dateFrom > dateTo)
-        {
-            return BadRequest(new ErrorResponse
-            {
-                Error = "Invalid date range",
-                Detail = "'dateFrom' must be earlier than or equal to 'dateTo'."
-            });
-        }
-
-        var dateRange = dateFrom.HasValue || dateTo.HasValue
-            ? new DateRange(dateFrom, dateTo)
-            : null;
 
         try
         {
@@ -95,6 +73,67 @@ public class EventsController : ControllerBase
         catch (DbUpdateException ex)
         {
             _logger.LogError(ex, "Failed to save events to the database");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to save events to the database",
+                Detail = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// Like <see cref="Recognize"/>, but when a recognized event is the same real event
+    /// as one already persisted (announced in another post), the duplicate is not saved
+    /// again: the already stored event stays and is the one returned for that post.
+    /// </summary>
+    /// <remarks>
+    /// Same body, query parameters, header requirements and error codes as
+    /// <c>POST /api/events/recognize</c>.
+    /// </remarks>
+    [HttpPost("recognize-deduplicated")]
+    [ProducesResponseType(typeof(RecognitionResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> RecognizeDeduplicated(
+        [FromBody] List<InstagramPost> posts,
+        [FromQuery] DateTime? dateFrom = null,
+        [FromQuery] DateTime? dateTo = null,
+        CancellationToken ct = default)
+    {
+        if (ValidateRecognizeRequest(posts, dateFrom, dateTo, out var deepSeekApiKey, out var dateRange)
+            is { } error)
+        {
+            return error;
+        }
+
+        try
+        {
+            var result = await _eventService.RecognizeEventsDeduplicatedAsync(
+                posts, deepSeekApiKey, dateRange, ct);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogError(ex, "LLM response parsing error during deduplicated recognition");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Error = "Failed to process the LLM response",
+                Detail = ex.Message
+            });
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "DeepSeek API call failed during deduplicated recognition");
+            return StatusCode(StatusCodes.Status502BadGateway, new ErrorResponse
+            {
+                Error = "Failed to communicate with the LLM service",
+                Detail = ex.Message
+            });
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Failed to save events to the database during deduplicated recognition");
             return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
             {
                 Error = "Failed to save events to the database",
@@ -370,6 +409,52 @@ public class EventsController : ControllerBase
             Error = "Missing API key",
             Detail = $"The '{DeepSeekApiKeyHeader}' header is required with a valid DeepSeek API key."
         });
+
+    /// <summary>
+    /// Validates the inputs shared by the recognition endpoints. Returns the error
+    /// result to send, or null when the request is valid (with the api key and the
+    /// resolved date range as outputs).
+    /// </summary>
+    private IActionResult? ValidateRecognizeRequest(
+        List<InstagramPost>? posts,
+        DateTime? dateFrom,
+        DateTime? dateTo,
+        out string deepSeekApiKey,
+        out DateRange? dateRange)
+    {
+        deepSeekApiKey = string.Empty;
+        dateRange = null;
+
+        if (posts == null || posts.Count == 0)
+        {
+            return BadRequest(new ErrorResponse
+            {
+                Error = "No posts provided",
+                Detail = "The request body must be a non-empty array of Instagram posts."
+            });
+        }
+
+        deepSeekApiKey = Request.Headers[DeepSeekApiKeyHeader].FirstOrDefault() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(deepSeekApiKey))
+        {
+            return MissingApiKey();
+        }
+
+        if (dateFrom.HasValue && dateTo.HasValue && dateFrom > dateTo)
+        {
+            return BadRequest(new ErrorResponse
+            {
+                Error = "Invalid date range",
+                Detail = "'dateFrom' must be earlier than or equal to 'dateTo'."
+            });
+        }
+
+        dateRange = dateFrom.HasValue || dateTo.HasValue
+            ? new DateRange(dateFrom, dateTo)
+            : null;
+
+        return null;
+    }
 
     private static bool TryParseMonth(string? month, out int year, out int monthNumber)
     {
