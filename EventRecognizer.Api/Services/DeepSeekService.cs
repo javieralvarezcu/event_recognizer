@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Net;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 using EventRecognizer.Api.Models;
@@ -9,7 +11,10 @@ public class DeepSeekService : IDeepSeekService
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<DeepSeekService> _logger;
+    private readonly IDeepSeekAuditService _auditService;
     private const string DeepSeekApiUrl = "https://api.deepseek.com/v1/chat/completions";
+    private const string DeepSeekModel = "deepseek-chat";
+    private const double DeepSeekTemperature = 0.3;
 
     // A batch of ~57 posts overflowed the 4096-token output limit and DeepSeek cut the
     // JSON mid-string ("Expected end of string, but instead reached end of data").
@@ -17,10 +22,14 @@ public class DeepSeekService : IDeepSeekService
     private const int PostsPerChunk = 20;
     private const int MaxAttempts = 3; // initial attempt + 2 retries
 
-    public DeepSeekService(IHttpClientFactory httpClientFactory, ILogger<DeepSeekService> logger)
+    public DeepSeekService(
+        IHttpClientFactory httpClientFactory,
+        ILogger<DeepSeekService> logger,
+        IDeepSeekAuditService auditService)
     {
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _auditService = auditService;
     }
 
     public async Task<List<PostAnalysisResult>> AnalyzePostsAsync(
@@ -36,11 +45,15 @@ public class DeepSeekService : IDeepSeekService
         // array and fill it chunk by chunk, keeping the alignment intact.
         var results = new PostAnalysisResult[posts.Count];
 
+        var totalChunks = (int)Math.Ceiling(posts.Count / (double)PostsPerChunk);
         for (var offset = 0; offset < posts.Count; offset += PostsPerChunk)
         {
             var chunk = posts.GetRange(offset, Math.Min(PostsPerChunk, posts.Count - offset));
+            var chunkNumber = offset / PostsPerChunk + 1;
 
             var chunkResults = await SendChatWithRetriesAsync(
+                "analyze_posts",
+                $"chunk {chunkNumber}/{totalChunks}: {chunk.Count} posts",
                 BuildSystemPrompt(), BuildUserPrompt(chunk, dateRange), apiKey, maxTokens: 4096,
                 ParseBatchAnalysis, ct);
             if (chunkResults == null)
@@ -91,6 +104,8 @@ public class DeepSeekService : IDeepSeekService
             return new List<DuplicateGroupResult>();
 
         var groups = await SendChatWithRetriesAsync(
+            "cleanup_duplicates",
+            $"{events.Count} events ({monthLabel})",
             BuildCleanupSystemPrompt(), BuildCleanupUserPrompt(events, monthLabel), apiKey, maxTokens: 8192,
             ParseDuplicateCleanup, ct);
         if (groups == null)
@@ -128,6 +143,8 @@ public class DeepSeekService : IDeepSeekService
             return new List<DuplicateGroupResult>();
 
         var groups = await SendChatWithRetriesAsync(
+            "dedup_candidates",
+            $"{candidates.Count} new vs {existingEvents.Count} existing",
             BuildDedupCandidatesSystemPrompt(), BuildDedupCandidatesUserPrompt(candidates, existingEvents),
             apiKey, maxTokens: 8192, ParseDuplicateCleanup, ct);
         if (groups == null)
@@ -147,6 +164,8 @@ public class DeepSeekService : IDeepSeekService
             return new List<CrossMatchResult>();
 
         var matches = await SendChatWithRetriesAsync(
+            "cross_match",
+            $"{ourEvents.Count} ours vs {muxoEvents.Count} muxojaleo",
             BuildCrossMatchSystemPrompt(), BuildCrossMatchUserPrompt(ourEvents, muxoEvents), apiKey, maxTokens: 8192,
             ParseCrossMatches, ct);
         if (matches == null)
@@ -286,9 +305,12 @@ public class DeepSeekService : IDeepSeekService
     /// <summary>
     /// Sends one chat request with retries and returns the parsed result, or null when
     /// all attempts produced malformed responses. Transient HTTP errors rethrow after
-    /// the last attempt so callers can return 502 instead of fake results.
+    /// the last attempt so callers can return 502 instead of fake results. Every
+    /// attempt (request, response, tokens and outcome) is recorded in the audit log.
     /// </summary>
     private async Task<T?> SendChatWithRetriesAsync<T>(
+        string operation,
+        string contextSummary,
         string systemPrompt,
         string userPrompt,
         string apiKey,
@@ -299,46 +321,156 @@ public class DeepSeekService : IDeepSeekService
         var attempt = 1;
         while (true)
         {
+            var log = NewExchangeLog(operation, contextSummary, systemPrompt, userPrompt, maxTokens, attempt);
+            var stopwatch = Stopwatch.StartNew();
+            var retry = false;
+            var rethrow = false;
+            Exception? failure = null;
+
             try
             {
-                var content = await SendChatOnceAsync(systemPrompt, userPrompt, apiKey, maxTokens, ct);
-                return parse(content);
-            }
-            catch (InvalidOperationException ex)
-            {
-                if (attempt >= MaxAttempts)
-                {
-                    _logger.LogError(ex,
-                        "DeepSeek returned an unexpected response format after {MaxAttempts} attempts",
-                        MaxAttempts);
-                    return default;
-                }
+                var http = await SendChatOnceAsync(systemPrompt, userPrompt, apiKey, maxTokens, ct);
+                ApplyHttpResult(log, http);
 
-                // Truncated/malformed JSON from the LLM: worth retrying — the model
-                // often produces a valid response on a second attempt.
-                _logger.LogWarning(ex,
-                    "DeepSeek returned an unexpected response format (attempt {Attempt}/{MaxAttempts}). Retrying...",
-                    attempt, MaxAttempts);
-            }
-            catch (HttpRequestException ex) when (IsTransientHttpError(ex))
-            {
-                if (attempt >= MaxAttempts)
+                try
                 {
-                    _logger.LogError(ex,
+                    var parsed = parse(http.Content);
+                    log.Succeeded = true;
+                    FinishExchangeLog(log, stopwatch);
+                    await _auditService.RecordAsync(log, ct);
+                    return parsed;
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // The HTTP exchange was fine but the LLM content is not usable
+                    // (bad JSON): worth retrying — the model often produces a valid
+                    // response on a second attempt.
+                    failure = ex;
+                    log.ErrorMessage = $"Failed to parse the LLM content: {ex.Message}";
+                    retry = true;
+                }
+            }
+            catch (DeepSeekResponseException ex)
+            {
+                // Truncated/malformed envelope from the LLM: worth retrying too.
+                failure = ex;
+                log.HttpStatusCode = (int)ex.StatusCode;
+                log.ResponseContent = ex.RawBody;
+                log.ErrorMessage = ex.Message;
+                if (ex.RawBody != null)
+                    log.CompletionTokens = EstimateTokens(ex.RawBody.Length);
+                retry = true;
+            }
+            catch (HttpRequestException ex)
+            {
+                failure = ex;
+                log.HttpStatusCode = (int?)ex.StatusCode;
+                log.ErrorMessage = ex.Message;
+                retry = IsTransientHttpError(ex);
+                rethrow = !retry; // non-transient (401, 404...): propagate immediately
+            }
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                // HttpClient timeout: no HTTP response ever arrived.
+                failure = ex;
+                log.ErrorMessage = "The DeepSeek API call timed out.";
+                rethrow = true;
+            }
+            catch (OperationCanceledException)
+            {
+                throw; // the client cancelled the request: propagate, nothing to audit
+            }
+
+            FinishExchangeLog(log, stopwatch);
+            await _auditService.RecordAsync(log, ct);
+
+            if (rethrow)
+            {
+                _logger.LogError(failure, "DeepSeek API call failed ({Operation})", operation);
+                ExceptionDispatchInfo.Capture(failure!).Throw(); // preserves the original stack trace
+            }
+
+            if (attempt >= MaxAttempts)
+            {
+                if (failure is HttpRequestException)
+                {
+                    // API unreachable: let the controller return 502 rather than fake results.
+                    _logger.LogError(failure,
                         "DeepSeek API returned a transient HTTP error after {MaxAttempts} attempts",
                         MaxAttempts);
-                    throw; // API unreachable: let the controller return 502 rather than fake results
+                    ExceptionDispatchInfo.Capture(failure).Throw();
                 }
 
-                _logger.LogWarning(ex,
-                    "DeepSeek API returned a transient HTTP error (attempt {Attempt}/{MaxAttempts}). Retrying...",
-                    attempt, MaxAttempts);
+                _logger.LogError(failure,
+                    "DeepSeek returned an unexpected response format after {MaxAttempts} attempts",
+                    MaxAttempts);
+                return default;
             }
+
+            _logger.LogWarning(failure,
+                "DeepSeek call failed (attempt {Attempt}/{MaxAttempts}). Retrying...",
+                attempt, MaxAttempts);
 
             await DelayBetweenRetriesAsync(attempt, ct);
             attempt++;
         }
     }
+
+    /// <summary>Creates the audit row for one attempt with everything known before sending.</summary>
+    private static DeepSeekCallLog NewExchangeLog(
+        string operation,
+        string contextSummary,
+        string systemPrompt,
+        string userPrompt,
+        int maxTokens,
+        int attempt)
+    {
+        return new DeepSeekCallLog
+        {
+            Operation = operation,
+            ContextSummary = contextSummary,
+            SystemPrompt = systemPrompt,
+            UserPrompt = userPrompt,
+            Model = DeepSeekModel,
+            MaxTokens = maxTokens,
+            Temperature = DeepSeekTemperature,
+            PromptTokens = EstimateTokens(systemPrompt.Length + userPrompt.Length),
+            TokensEstimated = true, // switched off by ApplyHttpResult when the API reports usage
+            Attempt = attempt,
+            StartedAtUtc = DateTime.UtcNow
+        };
+    }
+
+    /// <summary>Fills the audit row with the HTTP response data.</summary>
+    private static void ApplyHttpResult(DeepSeekCallLog log, DeepSeekHttpResult http)
+    {
+        log.HttpStatusCode = (int)HttpStatusCode.OK;
+        log.FinishReason = http.FinishReason;
+        log.ResponseContent = http.Content;
+
+        if (http.Usage != null)
+        {
+            log.PromptTokens = http.Usage.PromptTokens;
+            log.CompletionTokens = http.Usage.CompletionTokens;
+            log.TokensEstimated = false;
+        }
+        else
+        {
+            log.CompletionTokens = EstimateTokens(http.Content.Length);
+        }
+    }
+
+    /// <summary>Stamps the end time, duration and total tokens of the exchange.</summary>
+    private static void FinishExchangeLog(DeepSeekCallLog log, Stopwatch stopwatch)
+    {
+        stopwatch.Stop();
+        log.CompletedAtUtc = DateTime.UtcNow;
+        log.DurationMs = stopwatch.ElapsedMilliseconds;
+        log.TotalTokens = log.PromptTokens + log.CompletionTokens;
+    }
+
+    /// <summary>Heuristic token estimate used when the API does not report usage: ~4 chars per token.</summary>
+    private static int EstimateTokens(int charCount) => charCount / 4;
 
     // Retry backoff between attempts. Virtual so tests can skip the delay.
     protected virtual Task DelayBetweenRetriesAsync(int attempt, CancellationToken ct)
@@ -350,7 +482,7 @@ public class DeepSeekService : IDeepSeekService
             or HttpStatusCode.BadGateway
             or HttpStatusCode.ServiceUnavailable;
 
-    private async Task<string> SendChatOnceAsync(
+    private async Task<DeepSeekHttpResult> SendChatOnceAsync(
         string systemPrompt,
         string userPrompt,
         string apiKey,
@@ -359,14 +491,14 @@ public class DeepSeekService : IDeepSeekService
     {
         var requestPayload = new DeepSeekRequest
         {
-            Model = "deepseek-chat",
+            Model = DeepSeekModel,
             Messages = new List<DeepSeekMessage>
             {
                 new() { Role = "system", Content = systemPrompt },
                 new() { Role = "user", Content = userPrompt }
             },
             ResponseFormat = new DeepSeekResponseFormat { Type = "json_object" },
-            Temperature = 0.3,
+            Temperature = DeepSeekTemperature,
             MaxTokens = maxTokens
         };
 
@@ -391,27 +523,51 @@ public class DeepSeekService : IDeepSeekService
         }
         catch (JsonException ex)
         {
-            throw new InvalidOperationException("The DeepSeek API returned a malformed response.", ex);
+            throw new DeepSeekResponseException(
+                "The DeepSeek API returned a malformed response.", responseBody, HttpStatusCode.OK, ex);
         }
 
         if (deepSeekResponse?.Choices == null || deepSeekResponse.Choices.Count == 0)
-            throw new InvalidOperationException("DeepSeek returned no choices.");
+            throw new DeepSeekResponseException("DeepSeek returned no choices.", responseBody, HttpStatusCode.OK);
 
         var choice = deepSeekResponse.Choices[0];
 
         // finish_reason == "length" means the output hit the token limit, so the JSON
         // is almost certainly truncated — treat it as a malformed response and retry.
         if (string.Equals(choice.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException(
-                "DeepSeek response was truncated by the token limit (finish_reason=length).");
+            throw new DeepSeekResponseException(
+                "DeepSeek response was truncated by the token limit (finish_reason=length).",
+                responseBody, HttpStatusCode.OK);
 
         var responseContent = choice.Message?.Content;
         if (string.IsNullOrWhiteSpace(responseContent))
-            throw new InvalidOperationException("DeepSeek response content was empty.");
+            throw new DeepSeekResponseException("DeepSeek response content was empty.", responseBody, HttpStatusCode.OK);
 
         _logger.LogInformation("Raw DeepSeek response received ({Length} chars)", responseContent.Length);
 
-        return responseContent;
+        return new DeepSeekHttpResult(responseContent, choice.FinishReason, deepSeekResponse.Usage);
+    }
+
+    /// <summary>One successful HTTP exchange with DeepSeek, with the data the audit log keeps.</summary>
+    private sealed record DeepSeekHttpResult(string Content, string? FinishReason, DeepSeekUsage? Usage);
+
+    /// <summary>
+    /// The DeepSeek HTTP exchange completed but the response envelope is unusable
+    /// (malformed JSON, no choices, truncated, empty content). Carries the raw body
+    /// so the audit log keeps what the API actually returned.
+    /// </summary>
+    private sealed class DeepSeekResponseException : InvalidOperationException
+    {
+        public string? RawBody { get; }
+        public HttpStatusCode StatusCode { get; }
+
+        public DeepSeekResponseException(
+            string message, string? rawBody, HttpStatusCode statusCode, Exception? inner = null)
+            : base(message, inner)
+        {
+            RawBody = rawBody;
+            StatusCode = statusCode;
+        }
     }
 
     private static string BuildSystemPrompt()

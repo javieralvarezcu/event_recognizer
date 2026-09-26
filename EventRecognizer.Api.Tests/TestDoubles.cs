@@ -57,14 +57,35 @@ public sealed class StubHttpClientFactory : IHttpClientFactory
 }
 
 /// <summary>
+/// In-memory IDeepSeekAuditService collecting the audit rows the real service persists.
+/// </summary>
+public sealed class FakeDeepSeekAuditService : IDeepSeekAuditService
+{
+    public List<DeepSeekCallLog> RecordedLogs { get; } = new();
+
+    public Task RecordAsync(DeepSeekCallLog log, CancellationToken ct = default)
+    {
+        RecordedLogs.Add(log);
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
 /// DeepSeekService with the retry backoff replaced by a no-op so tests run instantly.
 /// </summary>
 public sealed class TestableDeepSeekService : DeepSeekService
 {
-    public TestableDeepSeekService(IHttpClientFactory httpClientFactory, ILogger<DeepSeekService> logger)
-        : base(httpClientFactory, logger)
+    public TestableDeepSeekService(
+        IHttpClientFactory httpClientFactory,
+        ILogger<DeepSeekService> logger,
+        FakeDeepSeekAuditService audit)
+        : base(httpClientFactory, logger, audit)
     {
+        Audit = audit;
     }
+
+    /// <summary>The audit rows recorded by this service.</summary>
+    public FakeDeepSeekAuditService Audit { get; }
 
     protected override Task DelayBetweenRetriesAsync(int attempt, CancellationToken ct)
         => Task.CompletedTask;
@@ -367,7 +388,10 @@ public static class TestData
     /// Serializes the envelope DeepSeek actually returns: choices[0].message.content holds
     /// the JSON string {"results": [...]} that the service parses into BatchAnalysisResult.
     /// </summary>
-    public static string BuildDeepSeekResponse(List<PostAnalysisResult> results, string finishReason = "stop")
+    public static string BuildDeepSeekResponse(
+        List<PostAnalysisResult> results,
+        string finishReason = "stop",
+        DeepSeekUsage? usage = null)
     {
         var content = JsonSerializer.Serialize(new BatchAnalysisResult { Results = results });
         var envelope = new DeepSeekResponse
@@ -379,7 +403,8 @@ public static class TestData
                     Message = new DeepSeekChoiceMessage { Content = content },
                     FinishReason = finishReason
                 }
-            }
+            },
+            Usage = usage
         };
         return JsonSerializer.Serialize(envelope);
     }

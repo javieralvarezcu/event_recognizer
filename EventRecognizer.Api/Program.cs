@@ -14,6 +14,11 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(connectionString));
 
+// Factory used by the audit logger to write DeepSeek exchange rows on their own
+// context, without touching the request-scoped context's pending changes.
+builder.Services.AddDbContextFactory<AppDbContext>(options =>
+    options.UseSqlServer(connectionString));
+
 // --- HTTP Client for DeepSeek (API key is set per-request from the client header) ---
 builder.Services.AddHttpClient("DeepSeek", client =>
 {
@@ -31,6 +36,7 @@ builder.Services.AddHttpClient("MuxoJaleo", client =>
 
 // --- App Services ---
 builder.Services.AddScoped<IDeepSeekService, DeepSeekService>();
+builder.Services.AddScoped<IDeepSeekAuditService, DeepSeekAuditService>();
 builder.Services.AddScoped<IMuxoScraperService, MuxoScraperService>();
 builder.Services.AddScoped<IEventService, EventService>();
 

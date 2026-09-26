@@ -15,6 +15,8 @@ public class AppDbContext : DbContext
 
     public DbSet<CrossMatch> CrossMatches => Set<CrossMatch>();
 
+    public DbSet<DeepSeekCallLog> DeepSeekCallLogs => Set<DeepSeekCallLog>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<EventRecord>(entity =>
@@ -50,6 +52,13 @@ public class AppDbContext : DbContext
                   .WithMany()
                   .HasForeignKey(m => m.MuxoEventId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<DeepSeekCallLog>(entity =>
+        {
+            entity.HasIndex(e => e.StartedAtUtc);
+
+            entity.HasIndex(e => e.Operation);
         });
     }
 }

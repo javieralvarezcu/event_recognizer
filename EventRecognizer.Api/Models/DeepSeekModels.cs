@@ -195,6 +195,22 @@ public class DeepSeekResponse
 {
     [JsonPropertyName("choices")]
     public List<DeepSeekChoice> Choices { get; set; } = new();
+
+    /// <summary>Token usage reported by the API (prompt, completion and total).</summary>
+    [JsonPropertyName("usage")]
+    public DeepSeekUsage? Usage { get; set; }
+}
+
+public class DeepSeekUsage
+{
+    [JsonPropertyName("prompt_tokens")]
+    public int PromptTokens { get; set; }
+
+    [JsonPropertyName("completion_tokens")]
+    public int CompletionTokens { get; set; }
+
+    [JsonPropertyName("total_tokens")]
+    public int TotalTokens { get; set; }
 }
 
 public class DeepSeekChoice

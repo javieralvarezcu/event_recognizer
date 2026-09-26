@@ -601,6 +601,36 @@ El panel usa este endpoint para mostrar en el calendario los eventos de muxojale
 | `Reason` | `nvarchar(500)` | NULL | Motivo del cruce dado por el LLM |
 | `CreatedAt` | `datetime2` | NOT NULL | Fecha de creación del cruce |
 
+### Tabla `DeepSeekCallLogs` (auditoría de llamadas a DeepSeek)
+
+Cada **intento** de llamada HTTP a la API de DeepSeek deja una fila: qué se mandó,
+qué se recibió, cuántos tokens costó y cuánto tardó. Un reintento genera una fila
+adicional. **La API key nunca se guarda.**
+
+| Columna | Tipo | Restricciones | Descripción |
+|---|---|---|---|
+| `Id` | `int` | PK, IDENTITY | Clave primaria autoincremental |
+| `Operation` | `nvarchar(50)` | NOT NULL, INDEX | Operación: `analyze_posts`, `cleanup_duplicates`, `dedup_candidates` o `cross_match` |
+| `ContextSummary` | `nvarchar(500)` | NULL | Contexto legible del intercambio (nº de posts/eventos, nº de chunk, mes…) |
+| `SystemPrompt` | `nvarchar(max)` | NOT NULL | System prompt enviado |
+| `UserPrompt` | `nvarchar(max)` | NOT NULL | User prompt enviado |
+| `ResponseContent` | `nvarchar(max)` | NULL | Contenido devuelto por el LLM (o el body crudo si el envelope era inválido; NULL si no hubo respuesta HTTP) |
+| `Model` | `nvarchar(50)` | NOT NULL | Modelo solicitado (`deepseek-chat`) |
+| `MaxTokens` | `int` | NOT NULL | `max_tokens` solicitado |
+| `Temperature` | `float` | NOT NULL | `temperature` enviada |
+| `PromptTokens` | `int` | NOT NULL | Tokens del request: uso reportado por la API si existe; si no, estimación (caracteres/4) |
+| `CompletionTokens` | `int` | NOT NULL | Tokens de la respuesta: uso reportado por la API si existe; si no, estimación (caracteres/4). 0 si no hubo respuesta |
+| `TotalTokens` | `int` | NOT NULL | Suma de prompt + completion |
+| `TokensEstimated` | `bit` | NOT NULL | `1` cuando los tokens son la estimación heurística (la API no reportó `usage`) |
+| `Attempt` | `int` | NOT NULL | Nº de intento dentro del bucle de reintentos (1 = primero) |
+| `Succeeded` | `bit` | NOT NULL | Si el intercambio produjo un resultado parseable |
+| `HttpStatusCode` | `int` | NULL | Código HTTP de la respuesta (NULL si nunca llegó una respuesta) |
+| `FinishReason` | `nvarchar(50)` | NULL | `finish_reason` reportado por la API (`stop`, `length`…) |
+| `ErrorMessage` | `nvarchar(2000)` | NULL | Error si el intercambio falló (parse, HTTP, timeout) |
+| `DurationMs` | `bigint` | NOT NULL | Duración del intercambio en milisegundos |
+| `StartedAtUtc` | `datetime2` | NOT NULL, INDEX | Instante UTC exacto en que se envió el request |
+| `CompletedAtUtc` | `datetime2` | NOT NULL | Instante UTC exacto en que terminó el intercambio |
+
 ---
 
 ## Requisitos

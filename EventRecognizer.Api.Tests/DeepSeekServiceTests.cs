@@ -17,7 +17,8 @@ public class DeepSeekServiceTests
     {
         _service = new TestableDeepSeekService(
             new StubHttpClientFactory(_handler),
-            NullLogger<DeepSeekService>.Instance);
+            NullLogger<DeepSeekService>.Instance,
+            new FakeDeepSeekAuditService());
     }
 
     private static List<InstagramPost> CreatePosts(int count)
@@ -568,5 +569,138 @@ public class DeepSeekServiceTests
         var userPrompt = payload.Messages[1].Content;
         Assert.Contains("recurrencia: semanal: jueves (desde 2026-09-10, sin fecha de fin)", userPrompt);
         Assert.Contains("cuenta: juevescong", userPrompt);
+    }
+
+    [Fact]
+    public async Task SendChat_WithValidResponse_RecordsAuditRow()
+    {
+        var posts = CreatePosts(1);
+        var usage = new DeepSeekUsage { PromptTokens = 123, CompletionTokens = 45, TotalTokens = 168 };
+        _handler.Enqueue(HttpStatusCode.OK,
+            TestData.BuildDeepSeekResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }, usage: usage));
+
+        await _service.AnalyzePostsAsync(posts, "super-secret-key");
+
+        var log = Assert.Single(_service.Audit.RecordedLogs);
+        Assert.Equal("analyze_posts", log.Operation);
+        Assert.Contains("chunk 1/1", log.ContextSummary);
+        Assert.True(log.Succeeded);
+        Assert.Equal(200, log.HttpStatusCode);
+        Assert.Equal("stop", log.FinishReason);
+        Assert.Equal(1, log.Attempt);
+        Assert.Equal("deepseek-chat", log.Model);
+        Assert.Equal(4096, log.MaxTokens);
+        Assert.Equal(0.3, log.Temperature);
+
+        // Tokens come from the API usage block, not the heuristic.
+        Assert.Equal(123, log.PromptTokens);
+        Assert.Equal(45, log.CompletionTokens);
+        Assert.Equal(168, log.TotalTokens);
+        Assert.False(log.TokensEstimated);
+
+        // Prompts are stored whole, timestamps are exact and ordered.
+        Assert.Contains("Analiza las siguientes publicaciones", log.UserPrompt);
+        Assert.False(string.IsNullOrEmpty(log.SystemPrompt));
+        Assert.Contains("--- POST 0 ---", log.UserPrompt);
+        Assert.True(log.StartedAtUtc <= log.CompletedAtUtc);
+        Assert.True(log.CompletedAtUtc - log.StartedAtUtc >= TimeSpan.Zero);
+        Assert.NotEqual(default, log.StartedAtUtc);
+
+        // The API key must never end up in the audit trail.
+        Assert.DoesNotContain("super-secret-key", log.SystemPrompt);
+        Assert.DoesNotContain("super-secret-key", log.UserPrompt);
+    }
+
+    [Fact]
+    public async Task SendChat_WithoutUsageInResponse_EstimatesTokens()
+    {
+        var posts = CreatePosts(1);
+        _handler.Enqueue(HttpStatusCode.OK,
+            TestData.BuildDeepSeekResponse(new List<PostAnalysisResult> { TestData.NonEventResult() }));
+
+        await _service.AnalyzePostsAsync(posts, "key");
+
+        var log = Assert.Single(_service.Audit.RecordedLogs);
+        Assert.True(log.TokensEstimated);
+        Assert.Equal((log.SystemPrompt.Length + log.UserPrompt.Length) / 4, log.PromptTokens);
+        Assert.Equal(log.ResponseContent!.Length / 4, log.CompletionTokens);
+        Assert.Equal(log.PromptTokens + log.CompletionTokens, log.TotalTokens);
+    }
+
+    [Fact]
+    public async Task SendChat_WithMalformedContent_RecordsEveryFailedAttempt()
+    {
+        // Valid envelope but the inner content is not parseable JSON.
+        var envelope = JsonSerializer.Serialize(new DeepSeekResponse
+        {
+            Choices = new List<DeepSeekChoice>
+            {
+                new()
+                {
+                    Message = new DeepSeekChoiceMessage { Content = "esto no es json" },
+                    FinishReason = "stop"
+                }
+            }
+        });
+
+        var posts = CreatePosts(5);
+        for (var i = 0; i < 3; i++)
+            _handler.Enqueue(HttpStatusCode.OK, envelope);
+
+        await _service.AnalyzePostsAsync(posts, "key");
+
+        var logs = _service.Audit.RecordedLogs;
+        Assert.Equal(3, logs.Count);
+        for (var i = 0; i < logs.Count; i++)
+        {
+            var log = logs[i];
+            Assert.False(log.Succeeded);
+            Assert.Equal(200, log.HttpStatusCode);
+            Assert.Equal("esto no es json", log.ResponseContent);
+            Assert.Contains("parse", log.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(i + 1, log.Attempt);
+            Assert.True(log.TokensEstimated);
+            Assert.True(log.CompletionTokens > 0);
+        }
+    }
+
+    [Fact]
+    public async Task SendChat_WithTransientHttpError_RecordsFailedAttemptsThenThrows()
+    {
+        var posts = CreatePosts(3);
+        for (var i = 0; i < 3; i++)
+            _handler.Enqueue(HttpStatusCode.InternalServerError, "{}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => _service.AnalyzePostsAsync(posts, "key"));
+
+        var logs = _service.Audit.RecordedLogs;
+        Assert.Equal(3, logs.Count);
+        for (var i = 0; i < logs.Count; i++)
+        {
+            var log = logs[i];
+            Assert.False(log.Succeeded);
+            Assert.Equal(500, log.HttpStatusCode);
+            Assert.Null(log.ResponseContent);
+            Assert.False(string.IsNullOrEmpty(log.ErrorMessage));
+            Assert.Equal(i + 1, log.Attempt);
+            Assert.Equal(0, log.CompletionTokens);
+            Assert.True(log.PromptTokens > 0); // the request itself is still estimated
+            Assert.True(log.TokensEstimated);
+        }
+    }
+
+    [Fact]
+    public async Task SendChat_WithNonTransientHttpError_RecordsSingleFailedAttemptThenThrows()
+    {
+        var posts = CreatePosts(3);
+        _handler.Enqueue(HttpStatusCode.Unauthorized, "{}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => _service.AnalyzePostsAsync(posts, "key"));
+
+        var log = Assert.Single(_service.Audit.RecordedLogs);
+        Assert.False(log.Succeeded);
+        Assert.Equal(401, log.HttpStatusCode);
+        Assert.False(string.IsNullOrEmpty(log.ErrorMessage));
+        Assert.Equal(1, log.Attempt);
     }
 }
